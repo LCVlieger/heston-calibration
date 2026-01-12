@@ -3,11 +3,10 @@ import numpy as np
 import math
 from quantlib.models.mc_kernels import generate_paths_kernel as numba_kernel
 
-# --- 1. Naive Python Implementation (Baseline) ---
+# --- 1. Python Implementation (Baseline) ---
 def pure_python_mc(S0, r, sigma, T, n_paths, n_steps):
     """
     Standard Python loops without NumPy vectorization.
-    Represents how a generic developer might write logic initially.
     """
     dt = T / n_steps
     drift = (r - 0.5 * sigma**2) * dt
