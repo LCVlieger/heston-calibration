@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: quantlib
+Version: 0.1.0
+Summary: Object-Oriented Monte Carlo Option Pricing Library
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: numba
+Requires-Dist: matplotlib
