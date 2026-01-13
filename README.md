@@ -17,9 +17,9 @@ Standard risk-neutral discretization:
 $$S_{t+\Delta t} = S_t \exp\left( (r - \frac{1}{2}\sigma^2)\Delta t + \sigma \sqrt{\Delta t} Z \right)$$
 
 **2. Heston Stochastic Volatility**
-Modeled via two correlated Stochastic Differential Equations (SDEs):
-$$ dS_t = r S_t dt + \sqrt{v_t} S_t dW_S $$
-$$ dv_t = \kappa (\theta - v_t) dt + \xi \sqrt{v_t} dW_v $$
+Modeled via two correlated Stochastic Differential Equations (SDEs): \
+$dS_t = r S_t dt + \sqrt{v_t} S_t dW_S$ \
+$dv_t = \kappa (\theta - v_t) dt + \xi \sqrt{v_t} dW_v$ 
 *   **Correlation**: $dW_S$ and $dW_v$ are correlated with coefficient $\rho$ via Cholesky decomposition.
 *   **Mean Reversion**: Variance $v_t$ reverts to long-run mean $\theta$ at speed $\kappa$.
 
