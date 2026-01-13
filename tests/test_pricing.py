@@ -12,8 +12,7 @@ def default_market():
 
 def test_european_call_convergence(default_market):
     """
-    Test 1: Does Monte Carlo converge to the exact Black-Scholes price?
-    Tolerance: < 0.05 (Strict for European).
+    Test 1: Does Monte Carlo converge to the exact Black-Scholes price? Tolerance: < 0.05.
     """
     # 1. Setup
     T, K = 1.0, 100
@@ -34,8 +33,7 @@ def test_european_call_convergence(default_market):
 
 def test_asian_call_approximation(default_market):
     """
-    Test 2: Does Monte Carlo align with the Turnbull-Wakeman Approximation?
-    Tolerance: < 0.20 (Wider tolerance due to approximation bias).
+    Test 2: Does Monte Carlo align with the Turnbull-Wakeman Approximation? Tolerance: < 0.20.
     """
     # 1. Setup
     T, K = 1.0, 100
@@ -55,7 +53,7 @@ def test_asian_call_approximation(default_market):
 
 def test_put_call_parity(default_market):
     """
-    Test 3: Financial Consistency Check.
+    Test 3: Put call parity Consistency Check.
     Call - Put = S - K * exp(-rT)
     """
     T, K = 1.0, 100
