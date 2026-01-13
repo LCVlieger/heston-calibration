@@ -39,3 +39,47 @@ def generate_paths_kernel(S0: float, r: float, sigma: float,
             prices[i, j + 1] = S0 * np.exp(current_log_return)
             
     return prices
+
+@jit(nopython=True, cache=True, fastmath=True)
+def generate_heston_paths(S0, r, v0, kappa, theta, xi, rho, T, n_paths, n_steps):
+    """
+    Heston Model Simulation using Euler Discretization with 'Full Truncation'.
+    """
+    dt = T / n_steps
+    sqrt_dt = np.sqrt(dt)
+    
+    # Pre-compute Correlation Matrix factors
+    c1 = rho
+    c2 = np.sqrt(1 - rho**2)
+    
+    # Output arrays
+    prices = np.zeros((n_paths, n_steps + 1))
+    prices[:, 0] = S0
+    
+    # Current state - FORCE FLOAT64 to avoid Numba typing errors
+    curr_v = np.full(n_paths, v0, dtype=np.float64)
+    curr_s = np.full(n_paths, S0, dtype=np.float64)
+    
+    for j in range(n_steps):
+        # 1. Generate Independent Standard Normals
+        Z1 = np.random.standard_normal(n_paths) # For Stock
+        Z2 = np.random.standard_normal(n_paths) # For Variance helper
+        
+        # 2. Correlate the Variance Noise
+        Zv = c1 * Z1 + c2 * Z2
+        
+        # 3. Update Variance (Full Truncation)
+        v_positive = np.maximum(curr_v, 0.0)
+        dv = kappa * (theta - v_positive) * dt + xi * np.sqrt(v_positive) * sqrt_dt * Zv
+        curr_v = curr_v + dv
+        
+        # 4. Update Stock
+        vol_t = np.sqrt(v_positive)
+        drift = (r - 0.5 * v_positive) * dt
+        diffusion = vol_t * sqrt_dt * Z1
+        
+        curr_s = curr_s * np.exp(drift + diffusion)
+        
+        prices[:, j + 1] = curr_s
+        
+    return prices
