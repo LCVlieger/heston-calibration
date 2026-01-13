@@ -21,46 +21,83 @@ def main():
     # Run a simulation forcing Numba to compile the code.
     print("\n[System] Warmup JIT compiler...")
     _ = pricer.price_option(euro_call, n_paths=100)
-    print("[System] Compilation complete. Starting benchmarks.")
+    print("[System] Compilation complete.")
 
-    # 4. Benchmark European Option (excluding compilation)
+    # ---------------------------------------------------------
+    # 4. Greeks Calculation (Delta / Gamma)
+    # ---------------------------------------------------------
+    print("\n--- Computing Greeks (Finite Difference) ---")
+    n_paths_greeks = 500_000 
+    
+    # European Greeks
+    print(f"Calculating European Greeks (N={n_paths_greeks})...")
+    t0 = time.time()
+    greeks_euro = pricer.compute_greeks(euro_call, n_paths=n_paths_greeks)
+    dt = time.time() - t0
+    
+    print(f"Time:  {dt:.2f}s")
+    print(f"Price: {greeks_euro['price']:.4f}")
+    print(f"Delta: {greeks_euro['delta']:.4f}")
+    print(f"Gamma: {greeks_euro['gamma']:.4f}")
+
+    # Asian Greeks
+    print(f"\nCalculating Asian Greeks (N={n_paths_greeks})...")
+    greeks_asian = pricer.compute_greeks(asian_call, n_paths=n_paths_greeks)
+    print(f"Price: {greeks_asian['price']:.4f}")
+    print(f"Delta: {greeks_asian['delta']:.4f}") 
+    print(f"Gamma: {greeks_asian['gamma']:.4f}")
+
+    # ---------------------------------------------------------
+    # 5. Pricing & Statistical Analysis (Benchmarks)
+    # ---------------------------------------------------------
+    
+    # --- European Option ---
     print("\n--- Benchmarking: European Option ---")
     start_time = time.time()
-    euro_price = pricer.price_option(euro_call, n_paths=1_000_000)
+    # Returns PricingResult object (price, std_error, conf_interval)
+    res_euro = pricer.price_option(euro_call, n_paths=1_000_000)
     end_time = time.time()
     
-    print(f"Price: {euro_price:.4f}")
-    print(f"Time:  {end_time - start_time:.4f} seconds")
+    print(f"Price:      {res_euro.price:.4f}")
+    print(f"Std Error:  {res_euro.std_error:.6f}")
+    print(f"95% CI:     [{res_euro.conf_interval_95[0]:.4f}, {res_euro.conf_interval_95[1]:.4f}]")
+    print(f"Time:       {end_time - start_time:.4f} seconds")
 
-    # 5. Benchmark Asian Option
+    # --- Asian Option ---
     print("\n--- Benchmarking: Asian Option ---")
     
-    # Run Monte Carlo
     start_time = time.time()
-    asian_mc_price = pricer.price_option(asian_call, n_paths=500_000)
+    res_asian = pricer.price_option(asian_call, n_paths=500_000)
     end_time = time.time()
-    print(f"MC Price:      {asian_mc_price:.4f}")
-    print(f"MC Time:       {end_time - start_time:.4f}s")
     
-    # Run Hull Analytical Approximation
+    print(f"MC Price:   {res_asian.price:.4f}")
+    print(f"Std Error:  {res_asian.std_error:.6f}")
+    print(f"95% CI:     [{res_asian.conf_interval_95[0]:.4f}, {res_asian.conf_interval_95[1]:.4f}]")
+    print(f"MC Time:    {end_time - start_time:.4f}s")
+    
+    # ---------------------------------------------------------
+    # 6. Analytical Validation
+    # ---------------------------------------------------------
+    
+    # Hull / Turnbull-Wakeman Approx
     asian_approx_price = BlackScholesPricer.price_asian_arithmetic_approximation(
         env.S0, asian_call.K, asian_call.T, env.r, env.sigma
     )
-    print(f"Approx (TW):   {asian_approx_price:.4f}")
+    print(f"Approx (TW): {asian_approx_price:.4f}")
     
-    # Professional Comparison
-    diff = asian_mc_price - asian_approx_price
-    print(f"Difference:    {diff:.4f}")
+    diff = res_asian.price - asian_approx_price
+    print(f"Difference: {diff:.4f}")
+    
     if abs(diff) < 0.05:
         print(">> Validation Passed: MC aligns with Hull Approximation.")
     else:
-        print(">> Note: Small difference expected due to Discrete (MC) vs Continuous (Hull) averaging, and Lognormal Approximation.")
+        print(">> Note: Small difference expected due to Discrete (MC) vs Continuous (Hull) averaging.")
     
-    # 6. Validation
+    # Final BS Check
     bs_price = BlackScholesPricer.price_european_call(env.S0, K, T, env.r, env.sigma)
     print(f"\n[Validation]")
     print(f"Reference BS Price:  {bs_price:.4f}")
-    print(f"Asian Discount:      {(1 - asian_mc_price/euro_price)*100:.2f}%")
+    print(f"Asian Discount:      {(1 - res_asian.price/res_euro.price)*100:.2f}%")
 
 if __name__ == "__main__":
     main()
