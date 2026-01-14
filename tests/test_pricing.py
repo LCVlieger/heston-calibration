@@ -1,9 +1,9 @@
 import pytest
 import numpy as np
-from quantlib.market import MarketEnvironment
-from quantlib.instruments import EuropeanOption, AsianOption, OptionType
-from quantlib.models.mc_pricer import MonteCarloPricer
-from quantlib.analytics import BlackScholesPricer
+from heston_pricer.market import MarketEnvironment
+from heston_pricer.instruments import EuropeanOption, AsianOption, OptionType
+from heston_pricer.models.mc_pricer import MonteCarloPricer
+from heston_pricer.analytics import BlackScholesPricer
 
 @pytest.fixture
 def default_market():
