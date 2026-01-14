@@ -1,10 +1,10 @@
 import numpy as np
-from quantlib.market import MarketEnvironment
-from quantlib.instruments import BarrierOption, BarrierType, OptionType
-from quantlib.models.process import HestonProcess, BlackScholesProcess
-from quantlib.models.mc_pricer import MonteCarloPricer
-from quantlib.calibration import HestonCalibrator, MarketOption
-from quantlib.analytics import HestonAnalyticalPricer
+from heston_pricer.market import MarketEnvironment
+from heston_pricer.instruments import BarrierOption, BarrierType, OptionType
+from heston_pricer.models.process import HestonProcess, BlackScholesProcess
+from heston_pricer.models.mc_pricer import MonteCarloPricer
+from heston_pricer.calibration import HestonCalibrator, MarketOption
+from heston_pricer.analytics import HestonAnalyticalPricer
 
 def main():
     print("=== QUANTLIB: Full Cycle Pricing (Calibration -> Exotic) ===\n")
