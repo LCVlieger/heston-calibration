@@ -12,9 +12,10 @@ class MarketOption:
     option_type: str = "CALL" 
 
 class HestonCalibrator:
-    def __init__(self, S0: float, r: float):
+    def __init__(self, S0: float, r: float, q: float = 0.0): # <--- Add q here
         self.S0 = S0
         self.r = r
+        self.q = q  # <--- Store it
 
     def calibrate(self, options: List[MarketOption], init_guess: List[float] = None) -> Dict:
         """
@@ -41,12 +42,12 @@ class HestonCalibrator:
             sse = 0.0
             for opt in options:
                 model_price = HestonAnalyticalPricer.price_european_call(
-                    self.S0, opt.strike, opt.maturity, self.r,
+                    self.S0, opt.strike, opt.maturity, self.r, self.q, # <--- Pass self.q
                     kappa, theta, xi, rho, v0
                 )
                 sse += (model_price - opt.market_price) ** 2
             return sse
-
+        
         print(f"Starting Calibration on {len(options)} instruments...")
         
         # L-BFGS-B is excellent for bound-constrained optimization

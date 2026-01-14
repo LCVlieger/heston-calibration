@@ -65,11 +65,11 @@ class BlackScholesPricer:
 class HestonAnalyticalPricer:
     """
     Semi-Analytical Heston Price using Fourier Integration (Gil-Pelaez).
-    Used primarily for Calibration due to high speed.
+    Now supports Dividend Yield (q).
     """
     @staticmethod
-    def price_european_call(S0, K, T, r, kappa, theta, xi, rho, v0):
-        # 1. Characteristic Function
+    def price_european_call(S0, K, T, r, q, kappa, theta, xi, rho, v0): # <--- Added q
+        # 1. Characteristic Function (Updated for q)
         def heston_char_func(u):
             d = np.sqrt((rho * xi * u * 1j - kappa)**2 + xi**2 * (u * 1j + u**2))
             g = (kappa - rho * xi * u * 1j - d) / (kappa - rho * xi * u * 1j + d)
@@ -79,15 +79,21 @@ class HestonAnalyticalPricer:
                 
             D = (kappa * theta / xi**2) * \
                 ((kappa - rho * xi * u * 1j - d) * T - 2 * np.log((1 - g * np.exp(-d * T)) / (1 - g)))
-                
-            return np.exp(C * v0 + D + 1j * u * np.log(S0 * np.exp(r * T)))
+            
+            # <--- UPDATED: Drift is now (r - q)
+            # This represents the log-forward price: ln( S0 * exp((r-q)T) )
+            drift_term = 1j * u * np.log(S0 * np.exp((r - q) * T))
+            
+            return np.exp(C * v0 + D + drift_term)
 
         # 2. Integration (Gil-Pelaez)
-        limit = 200 # Sufficient for calibration
+        limit = 200 
         
         def integrand_p1(u):
+            # <--- UPDATED: Denominator uses (r - q)
+            # This normalizes by the Forward Price
             num = np.exp(-1j * u * np.log(K)) * heston_char_func(u - 1j)
-            denom = 1j * u * S0 * np.exp(r*T)
+            denom = 1j * u * S0 * np.exp((r - q) * T) 
             return np.real(num / denom)
             
         def integrand_p2(u):
@@ -98,4 +104,6 @@ class HestonAnalyticalPricer:
         P1 = 0.5 + (1/np.pi) * integrate.quad(integrand_p1, 0, limit)[0]
         P2 = 0.5 + (1/np.pi) * integrate.quad(integrand_p2, 0, limit)[0]
         
-        return S0 * P1 - K * np.exp(-r * T) * P2
+        # <--- UPDATED: Final Pricing Formula includes exp(-qT)
+        # Call = S0 * e^(-qT) * P1 - K * e^(-rT) * P2
+        return S0 * np.exp(-q * T) * P1 - K * np.exp(-r * T) * P2
