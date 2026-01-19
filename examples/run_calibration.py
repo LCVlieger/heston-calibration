@@ -4,7 +4,7 @@ from heston_pricer.calibration import HestonCalibrator, MarketOption
 
 def main():
     # 1. Simulate the Market (The "Hidden Truth")
-    S0, r = 100.0, 0.03
+    S0, r, q  = 100.0, 0.03, 0
     true_params = {
         'kappa': 1.5, 'theta': 0.04, 'xi': 0.5, 'rho': -0.7, 'v0': 0.04
     }
@@ -19,7 +19,7 @@ def main():
         for K in strikes:
             # Generate 'Market' Price using the True parameters
             price = HestonAnalyticalPricer.price_european_call(
-                S0, K, T, r, **true_params
+                S0, K, T, r, q, **true_params
             )
             market_data.append(MarketOption(K, T, price))
             print(f"Maturity={T:<4} Strike={K:<4} Price={price:.4f}")

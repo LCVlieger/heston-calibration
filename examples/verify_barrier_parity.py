@@ -2,6 +2,7 @@ import numpy as np
 from heston_pricer.market import MarketEnvironment
 from heston_pricer.instruments import EuropeanOption, BarrierOption, BarrierType, OptionType
 from heston_pricer.models.mc_pricer import MonteCarloPricer
+from heston_pricer.models.process import BlackScholesProcess
 
 def main():
     # 1. Setup
@@ -13,8 +14,9 @@ def main():
     barrier_level = 90  # Lower than S0
     
     env = MarketEnvironment(S0, r, sigma)
-    pricer = MonteCarloPricer(env)
-    
+    process = BlackScholesProcess(env) # Same architecture, different physics!
+    pricer = MonteCarloPricer(process)
+
     print(f"--- Barrier Option Parity Check ---")
     print(f"Spot: {S0}, Strike: {K}, Barrier: {barrier_level}")
 
@@ -35,9 +37,9 @@ def main():
     
     print(f"Running Simulations (N={n_paths})...")
     
-    p_euro = pricer.price_option(euro_call, n_paths).price
-    p_out = pricer.price_option(do_call, n_paths).price
-    p_in = pricer.price_option(di_call, n_paths).price
+    p_euro = pricer.price(euro_call, n_paths).price
+    p_out = pricer.price(do_call, n_paths).price
+    p_in = pricer.price(di_call, n_paths).price
     
     # 4. Check Parity
     sum_barrier = p_out + p_in

@@ -10,7 +10,7 @@ def main():
     print("=== QUANTLIB: Full Cycle Pricing (Calibration -> Exotic) ===\n")
 
     # 1. The Hidden Truth (Market Data Generation)
-    S0, r = 100.0, 0.03
+    S0, r, q = 100.0, 0.03, 0
     # True Params: High Crash Risk (rho = -0.7)
     true_params = {'kappa': 1.5, 'theta': 0.04, 'xi': 0.5, 'rho': -0.7, 'v0': 0.04}
     
@@ -20,7 +20,7 @@ def main():
     market_options = []
     print("[1] Reading Market Data (Liquid Vanillas)...")
     for K in strikes:
-        price = HestonAnalyticalPricer.price_european_call(S0, K, maturity, r, **true_params)
+        price = HestonAnalyticalPricer.price_european_call(S0, K, maturity, r, q, **true_params)
         market_options.append(MarketOption(K, maturity, price))
         print(f"    Strike={K:<3} Price={price:.4f}")
 

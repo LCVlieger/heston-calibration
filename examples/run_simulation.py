@@ -3,6 +3,7 @@ from heston_pricer.instruments import EuropeanOption, AsianOption, OptionType
 from heston_pricer.market import MarketEnvironment
 from heston_pricer.models.mc_pricer import MonteCarloPricer
 from heston_pricer.analytics import BlackScholesPricer 
+from heston_pricer.models.process import BlackScholesProcess
 
 def main():
     # 1. Setup Environment
@@ -15,12 +16,12 @@ def main():
     asian_call = AsianOption(K, T, OptionType.CALL)
 
     # 3. Initialize Pricer
-    pricer = MonteCarloPricer(env)
-    
+    process = BlackScholesProcess(env) # Same architecture, different physics!
+    pricer = MonteCarloPricer(process)
     # --- JIT Warm-up ---
     # Run a simulation forcing Numba to compile the code.
     print("\n[System] Warmup JIT compiler...")
-    _ = pricer.price_option(euro_call, n_paths=100)
+    _ = pricer.price(euro_call, n_paths=100)
     print("[System] Compilation complete.")
 
     # ---------------------------------------------------------
@@ -55,7 +56,7 @@ def main():
     print("\n--- Benchmarking: European Option ---")
     start_time = time.time()
     # Returns PricingResult object (price, std_error, conf_interval)
-    res_euro = pricer.price_option(euro_call, n_paths=1_000_000)
+    res_euro = pricer.price(euro_call, n_paths=1_000_000)
     end_time = time.time()
     
     print(f"Price:      {res_euro.price:.4f}")
@@ -67,7 +68,7 @@ def main():
     print("\n--- Benchmarking: Asian Option ---")
     
     start_time = time.time()
-    res_asian = pricer.price_option(asian_call, n_paths=500_000)
+    res_asian = pricer.price(asian_call, n_paths=500_000)
     end_time = time.time()
     
     print(f"MC Price:   {res_asian.price:.4f}")
