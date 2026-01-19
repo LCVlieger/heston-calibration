@@ -30,17 +30,17 @@ def main():
     print("Generating SPX Volatility Surface...")
 
     # 1. Calibrated Parameters (From your run)
-    S0 = 6896.04
+    S0 = 6896.84
     r = 0.045
     q = 0.015
     
     # "The DNA of the Market"
     params = {
-        'kappa': 0.1000, 
-        'theta': 0.0015, 
-        'xi': 2.0000, 
-        'rho': -0.7814, 
-        'v0': 0.0400
+        'kappa': 4.5243, 
+        'theta': 0.0537, 
+        'xi': 1.7527, 
+        'rho': -0.7161, 
+        'v0': 0.0259
     }
     
     print(f"Parameters: {params}")

@@ -5,10 +5,10 @@ from datetime import datetime
 from typing import List, Tuple
 from heston_pricer.calibration import MarketOption
 
-def fetch_spx_options(min_open_interest: int = 500) -> Tuple[List[MarketOption], float]:
+def fetch_spx_options(min_open_interest: int = 100) -> Tuple[List[MarketOption], float]:
     """
-    Fetches S&P 500 (^SPX) option chains, scanning until it finds 
-    valid liquid maturities (T > 14 days).
+    Fetches S&P 500 (^SPX) option chains using Bucket Scanning.
+    Ensures we get a Term Structure (Short, Medium, Long) rather than just next week's options.
     """
     ticker_symbol = "^SPX"
     print(f"--- 1. Connecting to Yahoo Finance ({ticker_symbol}) ---")
@@ -26,38 +26,52 @@ def fetch_spx_options(min_open_interest: int = 500) -> Tuple[List[MarketOption],
     print(f"    Found {len(expirations)} total expiration dates.")
     
     market_options = []
-    found_maturities = 0
-    REQUIRED_MATURITIES = 3  # We want at least 3 distinct valid expiration dates
     
-    print("\n--- 2. Scanning Option Chains ---")
+    # --- BUCKET DEFINITIONS ---
+    # We want to find at least one valid maturity in each bucket.
+    buckets = {
+        "Short (14d-3m)":  {'min': 0.04, 'max': 0.25, 'filled': False},
+        "Medium (3m-9m)":  {'min': 0.25, 'max': 0.75, 'filled': False},
+        "Long (9m-1.5y)":  {'min': 0.75, 'max': 1.50, 'filled': False}
+    }
     
-    # Scan up to the first 20 expirations to bypass daily/weekly noise
-    for exp_date_str in expirations[:25]:
-        if found_maturities >= REQUIRED_MATURITIES:
+    print("\n--- 2. Scanning Option Chains (Bucket Strategy) ---")
+    
+    # Iterate through ALL expirations (or a large slice) to find matches for our buckets
+    # We increase the slice to 50 to ensure we reach the yearly options.
+    for exp_date_str in expirations[:60]:
+        
+        # Check if we are done
+        if all(b['filled'] for b in buckets.values()):
+            print("    >> All buckets filled. Stopping scan.")
             break
-            
+
         # Calculate T
         exp_date = datetime.strptime(exp_date_str, "%Y-%m-%d")
         T = (exp_date - datetime.now()).days / 365.25
         
-        # FILTER 1: Time to Maturity
-        # We want > 14 days (cleaner volatility) and < 1.5 years
-        if T < 14/365.25:
-            # print(f"    Skipping {exp_date_str} (Too short: {T*365:.1f} days)")
-            continue
-        if T > 1.5:
+        # Determine which bucket this T falls into
+        target_bucket = None
+        for name, limits in buckets.items():
+            if limits['min'] <= T <= limits['max'] and not limits['filled']:
+                target_bucket = name
+                break
+        
+        # If this date doesn't fit a needed bucket, skip it (unless we want extra density)
+        if target_bucket is None:
             continue
             
-        print(f"    -> Checking Expiry: {exp_date_str} (T={T:.3f}y)")
+        print(f"    -> Checking Expiry: {exp_date_str} (T={T:.3f}y) for [{target_bucket}]")
         
         try:
             chain = ticker.option_chain(exp_date_str)
             calls = chain.calls
-        except Exception:
+        except Exception as e:
+            print(f"       [!] Error fetching chain: {e}")
             continue
 
-        # FILTER 2: Moneyness & Liquidity
-        # Moneyness: 0.85 < K/S0 < 1.15
+        # FILTER: Moneyness & Liquidity
+        # Moneyness: 0.85 < K/S0 < 1.15 (Focus on the smile around the money)
         mask = (
             (calls['strike'] > S0 * 0.85) & 
             (calls['strike'] < S0 * 1.15) & 
@@ -67,17 +81,17 @@ def fetch_spx_options(min_open_interest: int = 500) -> Tuple[List[MarketOption],
         filtered_calls = calls[mask]
         
         if filtered_calls.empty:
-            print(f"       [!] No liquid options found for this date (OI > {min_open_interest}).")
+            print(f"       [!] No liquid options found (OI > {min_open_interest}).")
             continue
             
         # Data Extraction
         count = 0
-        for _, row in filtered_calls.iterrows():
+        # We limit to ~10 options per maturity to prevent the optimizer from 
+        # being overwhelmed by one specific date.
+        for _, row in filtered_calls.iloc[::2].iterrows(): # Take every 2nd option to spread strikes
             bid, ask = row['bid'], row['ask']
-            # Use Mid if valid, else Last
             price = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else row['lastPrice']
             
-            # Sanity check: Price must be > 0.05
             if price < 0.05: continue
             
             market_options.append(MarketOption(
@@ -89,14 +103,13 @@ def fetch_spx_options(min_open_interest: int = 500) -> Tuple[List[MarketOption],
             count += 1
             
         if count > 0:
-            print(f"       Loaded {count} options.")
-            found_maturities += 1
+            print(f"       Loaded {count} options. >> Bucket [{target_bucket}] FILLED.")
+            buckets[target_bucket]['filled'] = True
             
     print(f"\n--- 3. Summary ---")
     print(f"    Total Liquid Options Collected: {len(market_options)}")
-    
-    if len(market_options) == 0:
-        print("\n[!] CRITICAL: Still 0 options. Try lowering 'min_open_interest' to 100.")
+    for name, status in buckets.items():
+        print(f"    {name}: {'Found' if status['filled'] else '❌ Missing'}")
     
     return market_options, S0
 
