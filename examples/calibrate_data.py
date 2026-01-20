@@ -75,8 +75,8 @@ def main():
 
     # 1. Fetch Data
     try:
-        ticker = "TSLA"  # Switched to TSLA as requested in your snippet
-        market_options, S0 = fetch_options(ticker, max_per_bucket=5) 
+        ticker = "COST"  # Switched to TSLA as requested in your snippet
+        market_options, S0 = fetch_options(ticker, max_per_bucket=6) 
     except Exception as e:
         print(f"Data Fetch Failed: {e}")
         return
@@ -89,8 +89,8 @@ def main():
     market_options.sort(key=lambda x: (x.maturity, x.strike))
 
     # 2. Market Assumptions
-    r = 0.036  # Risk-Free Rate
-    q = 0.00    # Dividend Yield (TSLA is 0.0)
+    r = 0.043     # Risk-Free Rate
+    q = 0.005    # Dividend Yield (TSLA is 0.0)
     
     print(f"\n[Environment]")
     print(f"Spot (S0):   {S0:.2f}")
@@ -100,11 +100,11 @@ def main():
 
     # 3. Initialize Calibrators
     calibrator_ana = HestonCalibrator(S0, r, q)
-    calibrator_mc = HestonCalibratorMC(S0, r, q, n_paths=25000, n_steps=200)
+    calibrator_mc = HestonCalibratorMC(S0, r, q, n_paths=50000, n_steps=400)
     
     # Initial Guess: [kappa, theta, xi, rho, v0]
     # NOTE: Ensure this matches your bounds logic if using TSLA (High Vol)
-    initial_guess = [1.5, 0.05, 1.5, -0.4, 0.05]
+    initial_guess = [1, 0.1, 0.05, -0.1, 0.4]
     
     # ---------------------------------------------------------
     # 4. Run Analytical Calibration
