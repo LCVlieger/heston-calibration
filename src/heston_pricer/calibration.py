@@ -87,11 +87,11 @@ class HestonCalibrator:
         result = minimize(
             objective, 
             x0, 
-            method='L-BFGS-B', 
+            method='L-BFGS-B',  #handles box constraints / bounds
             bounds=bounds, 
             callback=callback,
             tol=1e-6,
-            options={'ftol': 1e-9, 'eps': 1e-4, 'maxiter': 100}
+            options={'ftol': 1e-9, 'eps': 1e-5, 'maxiter': 100}
         )
 
         print(f"Optimization Finished: {result.message}")
