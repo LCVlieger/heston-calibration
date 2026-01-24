@@ -1,17 +1,72 @@
+I understand the issue now. The problem is that the `README.md` itself contains code blocks (using 3 backticks), which breaks the chat's display when I try to wrap it in a standard code block.
+
+Here is the **raw content** wrapped in a way that preserves the inner code blocks. You can copy everything between the lines.
+
+```text
 # HestonPricer: High-Performance Stochastic Volatility Engine
 
 **A JIT-compiled pricing and calibration library for Exotic Derivatives, bridging the gap between mathematical theory (Shreve/Hull) and production engineering.**
 
-##  Key Capabilities
+## 🚀 Key Capabilities
 
-* **Real-Time Calibration**: Solves the inverse problem for Heston parameters ($\kappa, \theta, \xi, \rho, v_0$) using **L-BFGS-B** optimization against live **S&P 500** option chains.
-* **HPC Architecture**: Python loops are replaced with **Numba** kernels (LLVM compilation), achieving a **~28x speedup** over vectorized NumPy for Monte Carlo simulation.
+* **Real-Time Calibration**: Solves the inverse problem for Heston parameters ($\kappa, \theta, \xi, \rho, v_0$) using **L-BFGS-B** optimization against live option chains (e.g., NVDA, TSLA).
+* **HPC Architecture**: Python loops are replaced with **Numba** kernels (LLVM compilation), achieving a **~16x speedup** over Pure Python and **2.5x speedup** over vectorized NumPy by eliminating memory overhead.
 * **Exotic Pricing**: Supports path-dependent payoffs including **Barrier (Knock-Out/Knock-In)** and **Arithmetic Asian** options.
+* **Risk Management**: Computes **Delta, Gamma, and Vega** via Finite Difference, correctly capturing "Negative Gamma" risks near barriers.
 * **Mathematical Rigor**: Implements **Gil-Pelaez Fourier Inversion** for fast calibration and **Full Truncation Euler** discretization for simulation stability.
 
 ---
 
-##  Mathematical Methodology
+## 📊 Case Study: NVIDIA (NVDA) Down-and-Out Call
+
+**Calibration Date:** Jan 24, 2026
+* **Regime:** High Mean Reversion ($\kappa \approx 4.8$), Negative Skew ($\rho \approx -0.46$).
+* **Barrier Risk:** The pricing engine detected **Negative Gamma** ($\Gamma \approx -0.06$) near the barrier ($150), highlighting the "Reverse Hedging" risk (selling into a falling market) inherent in barrier products.
+* **Volatility Exposure:** The model correctly identified a **Positive Vega** ($+79.1$) for the structure, as the "Long Call" optionality outweighed the "Knock-Out" probability at the current spot level ($187).
+
+---
+
+## ⚡ Performance Benchmarks
+
+*Hardware: Standard Consumer Laptop (Python 3.12)*
+*Simulation: 2,000,000 Paths, 252 Steps (Daily Monitoring)*
+
+| Implementation | Execution Time | Speedup vs Python | Speedup vs NumPy |
+| :--- | :--- | :--- | :--- |
+| **Pure Python** | ~610 s (Est.) | 1.0x | - |
+| **NumPy Vectorized** | 94.63 s | 6.4x | 1.0x |
+| **HestonPricer (Numba)** | **38.38 s** | **~15.9x** | **2.5x** |
+
+*Note: Numba JIT compiles the Monte Carlo kernel to machine code, eliminating memory allocation overhead for intermediate path arrays which bottlenecks NumPy at high scale.*
+
+---
+
+## 🛠️ Usage
+
+### 1. Market Calibration (The "Strat" View)
+Fetches live option chains, filters for liquidity, and performs a dual-phase calibration (Analytical Fourier → Monte Carlo refinement).
+```bash
+python examples/1_market_calibration.py
+```
+*Output: Saves `calibration_[TICKER]_[DATE]_meta.json` and reports IV-RMSE.*
+
+### 2. Exotic Pricing & Risk (The "Structuring" View)
+Loads the calibrated parameters to price a **Down-and-Out Call** and an **Arithmetic Asian Call**, including full Greeks.
+```bash
+python examples/2_exotic_pricing.py
+```
+*Output: Prices, Delta, Gamma, Vega.*
+
+### 3. Convergence & Benchmarking (The "Quant Dev" View)
+Validates the numerical stability of the engine and benchmarks Numba performance.
+```bash
+python examples/3_convergence_analysis.py
+```
+*Output: Speedup metrics and Fourier vs. MC error analysis.*
+
+---
+
+## 📚 Mathematical Methodology
 
 **1. Geometric Brownian Motion (Black-Scholes)**
 Standard risk-neutral discretization for an asset with risk-free rate $r$ and dividend yield $q$:
@@ -34,63 +89,14 @@ $$\text{Corr}(dW_S, dW_v) = \rho$$
 
 ---
 
-##  Performance Benchmarks
-
-*Hardware: Standard Cloud Instance (Python 3.10)*
-
-| Implementation | Paths | Execution Time | Speedup |
-| :--- | :--- | :--- | :--- |
-| **Pure Python** | 50k | 2.12 s | 1.0x |
-| **NumPy Vectorized** | 50k | 0.09 s | ~23x |
-| **HestonPricer (Numba)** | 1M | **2.08 s** | **~28x (vs Vectorized)** |
-
-*Note: Numba JIT compiles the Monte Carlo kernel to machine code, bypassing the Python Global Interpreter Lock (GIL) overhead for the inner loops.*
-
----
-
-##  Installation & Usage
+## Installation
 
 ```bash
 git clone [https://github.com/LCVlieger/heston_pricer](https://github.com/LCVlieger/heston_pricer)
 pip install -e .
 ```
 
-### Example: Pricing a Heston Barrier Option
-
-```python
-from heston_pricer.market import MarketEnvironment
-from heston_pricer.instruments import BarrierOption, BarrierType, OptionType
-from heston_pricer.models.process import HestonProcess
-from heston_pricer.models.mc_pricer import MonteCarloPricer
-
-# 1. Configure Market (Calibrated to S&P 500)
-# r=4.5%, q=1.5% (Dividend Yield)
-env = MarketEnvironment(
-    S0=6896.00, r=0.045, q=0.015,
-    v0=0.04, kappa=0.1, theta=0.04, xi=2.0, rho=-0.78
-)
-
-# 2. Initialize Engine
-process = HestonProcess(env)
-pricer = MonteCarloPricer(process)
-
-# 3. Define Instrument (Down-and-Out Call)
-# Strike=6900, Barrier=6000 (Knock-Out)
-barrier_opt = BarrierOption(
-    K=6900, T=0.5, 
-    barrier=6000.0, 
-    barrier_type=BarrierType.DOWN_AND_OUT, 
-    option_type=OptionType.CALL
-)
-
-# 4. Price (High-Performance Monte Carlo)
-# Returns price, standard error, and 95% confidence interval
-res = pricer.price(barrier_opt, n_paths=200_000)
-
-print(f"Exotic Price: {res.price:.4f} +/- {1.96 * res.std_error:.4f}")
-```
-
-## Testing & Validation
+## Testing
 
 The library includes a regression test suite to ensure mathematical accuracy.
 
@@ -98,6 +104,7 @@ The library includes a regression test suite to ensure mathematical accuracy.
 pytest tests/test_pricing.py -v
 ```
 
-* **Heston Validation:**: Monte Carlo results are cross-validated against the Semi-Analytical Solution (using Fourier integration logic similar to Heston '93)
-* **Convergence Checks**: Verifies that Monte Carlo estimates converge to the exact Black-Scholes price (European) and Turnbull-Wakeman approximation (Asian) within statistical tolerance.
-* **Parity checks**: Validates logical consistency, such as **Put-Call Parity** ($C - P = S - Ke^{-rT}$)
+* **Convergence Checks**: Verifies that Monte Carlo estimates converge to the exact Black-Scholes price (European) and Turnbull-Wakeman approximation (Asian).
+* **Parity checks**: Validates logical consistency, such as **Put-Call Parity**.
+
+```

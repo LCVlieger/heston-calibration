@@ -85,7 +85,7 @@ def main():
     S0, r, q, T = 100.0, 0.05, 0.0, 1.0
     v0, kappa, theta, xi, rho = 0.04, 1.0, 0.04, 0.5, -0.7
     
-    n_paths = 1000_000
+    n_paths = 2_000_000
     n_steps = 252
 
     # A. Pure Python (Run small batch to avoid waiting forever)
@@ -97,7 +97,7 @@ def main():
     # Extrapolate to 100k paths
     t_py_equiv = t_py * (n_paths / n_paths_py)
     print(f"    Time: {t_py:.4f}s")
-    print(f"    Extrapolated to 100k: {t_py_equiv:.2f}s")
+    print(f"    Extrapolated to {n_paths}k: {t_py_equiv:.2f}s")
 
     # B. NumPy (Run full batch)
     
