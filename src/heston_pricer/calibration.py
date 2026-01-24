@@ -1,7 +1,8 @@
 import numpy as np
-from scipy.optimize import minimize
+from scipy.optimize import minimize, brentq
+from scipy.stats import norm
 from dataclasses import dataclass
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from .analytics import HestonAnalyticalPricer
 from .market import MarketEnvironment
 from .models.process import HestonProcess
@@ -12,6 +13,29 @@ class MarketOption:
     maturity: float
     market_price: float
     option_type: str = "CALL" 
+
+# --- HELPER: Implied Volatility ---
+def implied_volatility(price: float, S: float, K: float, T: float, r: float, q: float) -> float:
+    """
+    Inverts Black-Scholes to find Implied Volatility.
+    """
+    if price <= 0: return 0.0
+    
+    # Intrinsic value check (approximate)
+    intrinsic = max(S * np.exp(-q*T) - K * np.exp(-r*T), 0)
+    if price < intrinsic: return 0.0
+
+    def bs_price(sigma):
+        d1 = (np.log(S / K) + (r - q + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        d2 = d1 - sigma * np.sqrt(T)
+        val = (S * np.exp(-q * T) * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2))
+        return val - price
+    
+    try:
+        # Bounded search for vol between 0.1% and 500%
+        return brentq(bs_price, 0.001, 5.0)
+    except:
+        return 0.0
 
 class HestonCalibrator:
     def __init__(self, S0: float, r: float, q: float = 0.0):
@@ -31,79 +55,70 @@ class HestonCalibrator:
 
         # Bounds
         bounds = [
-            (0.5, 7.5),    # kappa: LOWER BOUND 0.5. Forces the model to actually mean-revert.
-                            # This prevents the "theta explosion" hack.
-            
-            (0.001, 2.0),   # theta: UPPER BOUND 2.0 (140% Vol). 
-                            # Safe for TSLA, GME, Crypto, etc.
-            
-            (0.01, 3),    # xi: Vol of Vol. 5.0 is massive (fat tails).
-            
-            (-0.999, 0),# rho: Allow full range. 
-                            # Equities are usually < 0, but FX/Commodities can be > 0.
-            
-            (0.001, 2.0)    # v0: Initial variance. Same as theta.
+            (0.5, 7.5),    # kappa
+            (0.001, 2.0),  # theta
+            (0.01, 3.0),   # xi
+            (-0.999, 0.0), # rho
+            (0.001, 2.0)   # v0
         ]
 
-        # --- 1. THE FIX: Weighted Objective Function ---
         def objective(params):
             kappa, theta, xi, rho, v0 = params
             
-            # Penalties for impossible math (Soft Constraints)
+            # Feller Penalty (Soft Constraint)
             if 2 * kappa * theta < xi**2: 
-                # Feller violation penalty (optional, but helps stability)
-                penalty = 1e6 * (abs(2 * kappa * theta < xi**2)**2)
+                penalty = 1e6 * (abs(2 * kappa * theta - xi**2)**2)
             else:
                 penalty = 0.0
 
             sse = 0.0
-            
             for opt in options:
                 model_price = HestonAnalyticalPricer.price_european_call(
                     self.S0, opt.strike, opt.maturity, self.r, self.q,
                     kappa, theta, xi, rho, v0
                 )
-                
-                # CRITICAL: Weight by 1/MarketPrice
-                # A $0.10 error on a $1.00 option is now a HUGE error (10%),
-                # forcing the optimizer to fit the skew (xi/rho).
-                weight = 1.0 / np.sqrt(opt.market_price + 1e-5) # Avoid div/0
-                
-                # Relative Squared Error
-                error = (model_price - opt.market_price) * weight
-                sse += error ** 2
+                # Weight by 1/sqrt(Price) to prioritize OTM/ITM balance
+                weight = 1.0 / np.sqrt(opt.market_price + 1e-5)
+                sse += ((model_price - opt.market_price) * weight) ** 2
             
             return sse + penalty
 
-        # --- 2. Debug Callback ---
         def callback(xk):
-            # This prints every iteration so you KNOW it's moving
-            print(f"   Iter: k={xk[0]:.2f}, th={xk[1]:.3f}, xi={xk[2]:.2f}, rho={xk[3]:.2f}, v0={xk[4]:.3f}")
+            print(f"   [Ana] Iter: k={xk[0]:.2f}, th={xk[1]:.3f}, xi={xk[2]:.2f}, rho={xk[3]:.2f}, v0={xk[4]:.3f}")
 
-        print(f"Starting L-BFGS-B Calibration on {len(options)} instruments...")
+        print(f"Starting Analytical Calibration on {len(options)} instruments...")
         
-        # We increase 'eps' (step size) so it takes bigger finite-difference steps
-        # This helps it 'see' the gradient on flat surfaces.
         result = minimize(
             objective, 
             x0, 
-            method='L-BFGS-B',  #handles box constraints / bounds
+            method='L-BFGS-B', 
             bounds=bounds, 
             callback=callback,
             tol=1e-6,
             options={'ftol': 1e-9, 'eps': 1e-5, 'maxiter': 100}
         )
 
-        print(f"Optimization Finished: {result.message}")
-        print(f"Final Weighted SSE: {result.fun:.6f}")
+        # --- IV-RMSE Calculation ---
+        kappa, theta, xi, rho, v0 = result.x
+        sse_iv = 0.0
+        count = 0
+        for opt in options:
+            model_price = HestonAnalyticalPricer.price_european_call(
+                self.S0, opt.strike, opt.maturity, self.r, self.q,
+                kappa, theta, xi, rho, v0
+            )
+            iv_mkt = implied_volatility(opt.market_price, self.S0, opt.strike, opt.maturity, self.r, self.q)
+            iv_model = implied_volatility(model_price, self.S0, opt.strike, opt.maturity, self.r, self.q)
+            
+            if iv_mkt > 0 and iv_model > 0:
+                sse_iv += (iv_model - iv_mkt) ** 2
+                count += 1
         
+        rmse_iv = np.sqrt(sse_iv / count) if count > 0 else 0.0
+
         return {
-            "kappa": result.x[0],
-            "theta": result.x[1],
-            "xi": result.x[2],
-            "rho": result.x[3],
-            "v0": result.x[4],
-            "success": result.success
+            "kappa": kappa, "theta": theta, "xi": xi, "rho": rho, "v0": v0,
+            "success": result.success, "sse": result.fun, "rmse_iv": rmse_iv
         }
 
 class HestonCalibratorMC:
@@ -164,27 +179,19 @@ class HestonCalibratorMC:
         return prices
 
     def objective(self, params):
-        # 1. Calculate Feller Penalty FIRST to save compute if violation is massive
-        #    (Though we still compute prices to get the gradient direction)
         kappa, theta, xi, rho, v0 = params
         
-        # Feller Condition: 2 * kappa * theta >= xi^2
-        # Violation: xi^2 - 2 * kappa * theta > 0
+        # Feller Constraint
         feller_resid = (xi**2) - (2 * kappa * theta)
-        
         if feller_resid > 0:
-            # Soft Constraint: Quadratic penalty creates a smooth gradient back to safety
-            # Scaling by 1000.0 makes it significant but differentiable
             penalty = 1000.0 * (feller_resid ** 2)
         else:
             penalty = 0.0
 
-        # 2. Calculate Pricing Error
         model_prices = self.get_prices(params)
         sse = 0.0
         for i, price in enumerate(model_prices):
             mkt_price = self.options_cache[i].market_price
-            # WEIGHTED SSE
             weight = 1.0 / np.sqrt(mkt_price + 1e-5)
             sse += ((price - mkt_price) * weight) ** 2
             
@@ -201,10 +208,10 @@ class HestonCalibratorMC:
 
         bounds = [
             (0.5, 7.5),    # kappa
-            (0.001, 2.0),   # theta
-            (0.01, 3),    # xi
-            (-0.999, 0),    # rho
-            (0.001, 2.0)    # v0
+            (0.001, 2.0),  # theta
+            (0.01, 3.0),   # xi
+            (-0.999, 0.0), # rho
+            (0.001, 2.0)   # v0
         ]
 
         def callback(xk):
@@ -222,7 +229,25 @@ class HestonCalibratorMC:
             options={'ftol': 1e-5, 'eps': 1e-5} 
         )
 
+        # --- Calculate MC IV-RMSE ---
+        # Get final prices using the optimal parameters
+        final_mc_prices = self.get_prices(result.x)
+        sse_iv = 0.0
+        count = 0
+        
+        for i, model_price in enumerate(final_mc_prices):
+            opt = options[i]
+            iv_mkt = implied_volatility(opt.market_price, self.base_env.S0, opt.strike, opt.maturity, self.base_env.r, self.base_env.q)
+            iv_model = implied_volatility(model_price, self.base_env.S0, opt.strike, opt.maturity, self.base_env.r, self.base_env.q)
+            
+            if iv_mkt > 0 and iv_model > 0:
+                sse_iv += (iv_model - iv_mkt) ** 2
+                count += 1
+        
+        rmse_iv = np.sqrt(sse_iv / count) if count > 0 else 0.0
+
         return {
             "kappa": result.x[0], "theta": result.x[1], "xi": result.x[2],
-            "rho": result.x[3], "v0": result.x[4], "success": result.success, "sse": result.fun
+            "rho": result.x[3], "v0": result.x[4], 
+            "success": result.success, "sse": result.fun, "rmse_iv": rmse_iv
         }

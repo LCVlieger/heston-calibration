@@ -12,7 +12,6 @@ class PricingResult:
 
 class MonteCarloPricer:
     def __init__(self, process: StochasticProcess):
-        # The Pricer now owns a Process (which owns the Market)
         self.process = process
 
     def price(self, option: Option, n_paths: int = 10000, n_steps: int = 100, **kwargs) -> PricingResult:
@@ -23,65 +22,60 @@ class MonteCarloPricer:
         payoffs = option.payoff(paths)
         
         # 3. Discount
-        # Access rate 'r' from the process's market environment
         discount_factor = np.exp(-self.process.market.r * option.T)
         discounted_payoffs = payoffs * discount_factor
         
-        # 4. Statistics (Standard Monte Carlo)
-        # Note: We removed Antithetic pairing here because the Heston kernel 
-        # as currently written produces independent paths.
+        # 4. Statistics
         mean_price = np.mean(discounted_payoffs)
         std_error = np.std(discounted_payoffs, ddof=1) / np.sqrt(n_paths)
-        
-        # 95% Confidence Interval
-        ci_lower = mean_price - 1.96 * std_error
-        ci_upper = mean_price + 1.96 * std_error
         
         return PricingResult(
             price=mean_price,
             std_error=std_error,
-            conf_interval_95=(ci_lower, ci_upper)
+            conf_interval_95=(mean_price - 1.96 * std_error, mean_price + 1.96 * std_error)
         )
 
-    def compute_greeks(self, option: Option, n_paths: int = 10000, bump_ratio: float = 0.01, seed: int = 42) -> Dict[str, float]:
+    # --- UPDATE: Added n_steps argument here ---
+    def compute_greeks(self, option: Option, n_paths: int = 10000, n_steps: int = 252, bump_ratio: float = 0.01, seed: int = 42) -> Dict[str, float]:
         """
-        Computes Delta and Gamma using Finite Differences.
-        Adapted to work with the Swappable Process architecture.
+        Computes Greeks with explicit n_steps control. 
+        Default increased to 252 (Daily monitoring) for better barrier accuracy.
         """
-        # We need to access the market *inside* the process
         original_market = self.process.market
         original_S0 = original_market.S0
-        epsilon = original_S0 * bump_ratio
+        epsilon_s = original_S0 * bump_ratio
+        epsilon_v = 0.001 
         
-        # 1. Central Price
+        # 1. Base Price
         np.random.seed(seed)
-        res_curr = self.price(option, n_paths)
+        # Pass n_steps explicitly
+        res_curr = self.price(option, n_paths, n_steps)
         
-        # 2. Up Price
-        # We create a modified market and 'inject' it into the process
-        market_up = replace(original_market, S0 = original_S0 + epsilon)
-        self.process.market = market_up
-        
+        # 2. Delta & Gamma (Spot Bumps)
+        self.process.market = replace(original_market, S0 = original_S0 + epsilon_s)
         np.random.seed(seed) 
-        res_up = self.price(option, n_paths)
+        res_up = self.price(option, n_paths, n_steps)
         
-        # 3. Down Price
-        market_down = replace(original_market, S0 = original_S0 - epsilon)
-        self.process.market = market_down
-        
+        self.process.market = replace(original_market, S0 = original_S0 - epsilon_s)
         np.random.seed(seed)
-        res_down = self.price(option, n_paths)
+        res_down = self.price(option, n_paths, n_steps)
         
-        # 4. Cleanup: Restore the original market to the process
+        # 3. Vega (Vol Bump)
+        self.process.market = replace(original_market, v0 = original_market.v0 + epsilon_v, S0=original_S0)
+        np.random.seed(seed)
+        res_vega = self.price(option, n_paths, n_steps)
+        
+        # Restore Market
         self.process.market = original_market
         
-        # Finite Differences Calculation
-        delta = (res_up.price - res_down.price) / (2 * epsilon)
-        gamma = (res_up.price - 2 * res_curr.price + res_down.price) / (epsilon ** 2)
+        # Calc
+        delta = (res_up.price - res_down.price) / (2 * epsilon_s)
+        gamma = (res_up.price - 2 * res_curr.price + res_down.price) / (epsilon_s ** 2)
+        vega = (res_vega.price - res_curr.price) / epsilon_v
         
         return {
             "price": res_curr.price,
-            "std_error": res_curr.std_error,
             "delta": delta,
-            "gamma": gamma
+            "gamma": gamma,
+            "vega_v0": vega
         }
