@@ -5,6 +5,12 @@ import math
 from heston_pricer.models.mc_kernels import generate_heston_paths
 from heston_pricer.analytics import HestonAnalyticalPricer
 
+
+""" Compare run speeds for pure python (loops), numpy and numba path generation. """
+
+
+
+# compute paths with regular loops.
 def heston_pure_python(S0, r, q, v0, kappa, theta, xi, rho, T, n_paths, n_steps):
     dt = T / n_steps
     sqrt_dt = math.sqrt(dt)
@@ -31,6 +37,7 @@ def heston_pure_python(S0, r, q, v0, kappa, theta, xi, rho, T, n_paths, n_steps)
         final_prices.append(s_t)
     return np.array(final_prices)
 
+# compute Heston paths using numpy / vectorized. 
 def heston_numpy_vectorized(S0, r, q, v0, kappa, theta, xi, rho, T, n_paths, n_steps):
     dt = T / n_steps
     sqrt_dt = np.sqrt(dt)
@@ -56,43 +63,42 @@ def benchmark_execution(func, *args, **kwargs):
     func(*args, **kwargs)
     return time.time() - t0
 
+# Run against the Numba jit implementation to compare speeds. 
 def main():
     S0, r, q, T = 100.0, 0.05, 0.0, 1.0
     v0, kappa, theta, xi, rho = 0.04, 1.0, 0.04, 0.5, -0.7
-    n_paths = 2_000_000
-    n_steps = 252
+    N, M = 2_000_000, 252
     
-    print(f"Benchmarking (Paths={n_paths}, Steps={n_steps})...")
-    
-    # 1. Python (Extrapolated)
-    n_py = 50_000
-    t_py_raw = benchmark_execution(heston_pure_python, S0, r, q, v0, kappa, theta, xi, rho, T, n_py, n_steps)
-    t_py = t_py_raw * (n_paths / n_py)
-    
+    print(f"[{pd.Timestamp.now().time()}] Benchmarking Kernels (N={N}, Steps={M})")
+
+    # 1. Python (Est)
+    t0 = time.time()
+    heston_pure_python(S0, r, q, v0, kappa, theta, xi, rho, T, 50_000, M)
+    t_py = (time.time() - t0) * (N / 50_000)
+
     # 2. NumPy
-    t_np = benchmark_execution(heston_numpy_vectorized, S0, r, q, v0, kappa, theta, xi, rho, T, n_paths, n_steps)
-    
-    # 3. Numba (JIT)
-    generate_heston_paths(S0, r, q, v0, kappa, theta, xi, rho, T, 10, n_steps) # Warmup
-    t_numba = benchmark_execution(generate_heston_paths, S0, r, q, v0, kappa, theta, xi, rho, T, n_paths, n_steps)
+    t0 = time.time()
+    heston_numpy_vectorized(S0, r, q, v0, kappa, theta, xi, rho, T, N, M)
+    t_np = time.time() - t0
 
-    df = pd.DataFrame([
-        {"Engine": "Pure Python", "Time (s)": t_py, "Speedup (vs Py)": 1.0},
-        {"Engine": "NumPy Vectorized", "Time (s)": t_np, "Speedup (vs Py)": t_py/t_np},
-        {"Engine": "Numba JIT", "Time (s)": t_numba, "Speedup (vs Py)": t_py/t_numba}
-    ])
-    
-    print("\nExecution Metrics:")
-    print(df.to_string(float_format="{:.2f}".format))
+    # 3. Numba
+    generate_heston_paths(S0, r, q, v0, kappa, theta, xi, rho, T, 10, M) # JIT Warmup
+    t0 = time.time()
+    generate_heston_paths(S0, r, q, v0, kappa, theta, xi, rho, T, N, M)
+    t_numba = time.time() - t0
 
-    # Consistency Check
-    K = 100
-    p_ana = HestonAnalyticalPricer.price_european_call(S0, K, T, r, q, kappa, theta, xi, rho, v0)
+    print(pd.DataFrame([
+        {"Engine": "Python (Est)", "Time": t_py, "Rel": 1.0},
+        {"Engine": "NumPy", "Time": t_np, "Rel": t_py/t_np},
+        {"Engine": "Numba", "Time": t_numba, "Rel": t_py/t_numba}
+    ]).set_index("Engine").to_string(float_format="{:.2f}".format))
+
+    # Validation
+    p_ana = HestonAnalyticalPricer.price_european_call(S0, 100, T, r, q, kappa, theta, xi, rho, v0)
     paths = generate_heston_paths(S0, r, q, v0, kappa, theta, xi, rho, T, 200_000, 100)
-    p_mc = np.mean(np.maximum(paths[:, -1] - K, 0)) * np.exp(-r*T)
+    p_mc = np.mean(np.maximum(paths[:, -1] - 100, 0)) * np.exp(-r*T)
     
-    print("\nNumerical Convergence:")
-    print(pd.Series({"Analytical": p_ana, "Monte Carlo": p_mc, "Abs Error": abs(p_ana - p_mc)}).to_string(float_format="{:.4f}".format))
+    print(f"\nConvergence Check: |Ana - MC| = {abs(p_ana - p_mc):.4f}")
 
 if __name__ == "__main__":
     main()

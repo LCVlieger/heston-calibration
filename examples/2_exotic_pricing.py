@@ -8,73 +8,53 @@ from heston_pricer.models.process import HestonProcess
 from heston_pricer.models.mc_pricer import MonteCarloPricer
 from heston_pricer.instruments import BarrierOption, BarrierType, AsianOption, OptionType
 
-def load_calibration():
-    # Locate latest metadata file
-    patterns = [
-        'calibration_*_meta.json', 
-        'examples/calibration_*_meta.json', 
-        '../calibration_*_meta.json'
-    ]
-    files = []
-    for p in patterns:
-        files.extend(glob.glob(p))
-        
-    if not files:
-        raise FileNotFoundError("Calibration metadata not found.")
-    
-    latest_file = max(files, key=os.path.getctime)
-    with open(latest_file, 'r') as f:
-        return json.load(f)
+""" Use market-retreived calibrated parameters from the Monte Carlo pricer 
+of 1. to price exotics (barrier & asian). """
 
-def run_pricing_engine(pricer, option, label):
-    # n_steps=400 ensures barrier discretization stability
-    res = pricer.compute_greeks(option, n_paths=100_000, n_steps=400, seed=42)
+
+# Load calibration from 1 (the MC parameters). 
+def load_calibration():
+    patterns = ['calibration_*_meta.json', 'examples/calibration_*_meta.json', '../calibration_*_meta.json']
+    files = []
+    for p in patterns: files.extend(glob.glob(p))
+    if not files: raise FileNotFoundError("No calibration meta file found.")
+    latest_file = max(files, key=os.path.getctime)
+    with open(latest_file, 'r') as f: return json.load(f)
+
+# Compute prices and greeks 
+def compute(pricer, option, name):
+    result = pricer.compute_greeks(option, n_paths=100_000, n_steps=400, seed=42)
     return {
-        "Instrument": label,
-        "Price": res['price'],
-        "Delta": res['delta'],
-        "Gamma": res['gamma'],
-        "Vega": res['vega_v0']
+        "Product": name, "Price": result['price'], 
+        "Delta": result['delta'], "Gamma": result['gamma'], "Vega": result['vega_v0']
     }
 
+
+# price asian and barrier options. 
 def main():
     try:
         data = load_calibration()
     except Exception as e:
-        print(f"Initialization failed: {e}")
+        print(f"[FATAL] {e}")
         return
 
-    params = data['monte_carlo_results']
-    mkt = data['market']
+    p = data['monte_carlo_results']
+    m = data['market']
+    env = MarketEnvironment(m['S0'], m['r'], m['q'], p['kappa'], p['theta'], p['xi'], p['rho'], p['v0'])
+    pricer = MonteCarloPricer(HestonProcess(env))
     
-    env = MarketEnvironment(
-        S0=mkt['S0'], r=mkt['r'], q=mkt['q'],
-        kappa=params['kappa'], theta=params['theta'], 
-        xi=params['xi'], rho=params['rho'], v0=params['v0']
-    )
-    
-    process = HestonProcess(env)
-    pricer = MonteCarloPricer(process)
-    
-    # Instruments
-    S0, T = mkt['S0'], 1.0
-    K = S0 * 1.05
-    barrier_level = S0 * 0.80
-    
-    instruments = [
-        (BarrierOption(K, T, barrier_level, BarrierType.DOWN_AND_OUT, OptionType.CALL), 
-         f"Down-and-Out Call (K={K:.2f}, B={barrier_level:.2f})"),
-        (AsianOption(K, T, OptionType.CALL), 
-         f"Arithmetic Asian Call (K={K:.2f})")
-    ]
+    # define option parameters
+    S0, K = m['S0'], m['S0'] * 1.05
+    B = S0 * 0.80
 
-    print(f"Pricing Date: {pd.Timestamp.now()} | Spot: {S0:.2f} | Vol: {np.sqrt(params['v0']):.2%}")
+    # run 
+    print(f"[{pd.Timestamp.now().time()}] Pricing Exotic Structures (S0={S0:.2f})...")
+    df = pd.DataFrame([
+        compute(pricer, BarrierOption(K, 1.0, B, BarrierType.DOWN_AND_OUT, OptionType.CALL), "Down-Out Call"),
+        compute(pricer, AsianOption(K, 1.0, OptionType.CALL), "Asian Call")
+    ])
     
-    results = [run_pricing_engine(pricer, opt, lbl) for opt, lbl in instruments]
-    df = pd.DataFrame(results)
-    
-    print("\nExotic Pricing & Risk:")
-    print(df.set_index("Instrument").to_string(float_format="{:.4f}".format))
+    print(df.set_index("Product").to_string(float_format="{:.4f}".format))
 
 if __name__ == "__main__":
     main()
