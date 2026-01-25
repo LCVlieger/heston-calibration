@@ -10,7 +10,6 @@ def fetch_options(ticker_symbol: str, max_per_bucket: int = 6) -> Tuple[List[Mar
     """
     ticker = yf.Ticker(ticker_symbol)
     
-    # A. Get Spot Price
     try:
         S0 = ticker.fast_info.get('last_price', None)
         if S0 is None:
@@ -18,22 +17,21 @@ def fetch_options(ticker_symbol: str, max_per_bucket: int = 6) -> Tuple[List[Mar
             if hist.empty: raise ValueError("No price data")
             S0 = hist['Close'].iloc[-1]
     except Exception as e:
-        print(f"[Error] Failed to fetch spot: {e}")
+        print(f"Error fetching spot price: {e}")
         return [], 0.0
 
-    # B. Setup Buckets (To ensure we get the full volatility surface)
-    # T > 0.10 filters out short-term gamma noise (options expiring in < 1 month)
+    # Bucket configuration to capture volatility surface structure
     buckets = {
         "Short":  {'min': 0.10, 'max': 0.40, 'count': 0},  # ~1-5 months
         "Medium": {'min': 0.40, 'max': 1.00, 'count': 0},  # ~5-12 months
         "Long":   {'min': 1.00, 'max': 2.50, 'count': 0}   # ~1-2.5 years
     }
     
-    # Strikes: roughly 10% OTM/ITM
+    # Target 10% OTM/ITM range
     target_moneyness = [0.90, 0.95, 1.00, 1.05, 1.10]
     market_options = []
     
-    print(f"[Data] Scanning chains for {ticker_symbol} (Spot: {S0:.2f})...")
+    print(f"Fetching option chain for {ticker_symbol} (Spot: {S0:.2f})...")
     expirations = ticker.options
     if not expirations: return [], 0.0
 
@@ -80,5 +78,5 @@ def fetch_options(ticker_symbol: str, max_per_bucket: int = 6) -> Tuple[List[Mar
             ))
             buckets[target_bucket]['count'] += 1
 
-    print(f"   -> Found: Short={buckets['Short']['count']}, Med={buckets['Medium']['count']}, Long={buckets['Long']['count']}")
+    print(f"Selected {len(market_options)} instruments across maturities.")
     return market_options, S0

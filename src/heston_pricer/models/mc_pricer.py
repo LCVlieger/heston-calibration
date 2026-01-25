@@ -15,12 +15,9 @@ class MonteCarloPricer:
         self.process = process
 
     def price(self, option: Option, n_paths: int = 10000, n_steps: int = 100, **kwargs) -> PricingResult:
-        # Pass kwargs (like 'noise') down to generate_paths
         paths = self.process.generate_paths(option.T, n_paths, n_steps, **kwargs)
-        
         payoffs = option.payoff(paths)
     
-        # Discount back to t=0
         discount_factor = np.exp(-self.process.market.r * option.T)
         discounted_payoffs = payoffs * discount_factor
     
@@ -35,43 +32,34 @@ class MonteCarloPricer:
 
     def compute_greeks(self, option: Option, n_paths: int = 10000, n_steps: int = 252, bump_ratio: float = 0.01, seed: int = 42) -> Dict[str, float]:
         """
-        Computes Greeks using EXPLICIT Common Random Numbers (CRN).
-        We generate the noise matrix once in Python and reuse it for all bumps.
-        This eliminates Monte Carlo variance from the Delta/Gamma/Vega calculation.
+        Computes Greeks using Finite Difference with Common Random Numbers (CRN).
         """
         original_market = self.process.market
         original_S0 = original_market.S0
         epsilon_s = original_S0 * bump_ratio
         epsilon_v = 0.001 
         
-        # --- CRITICAL FIX: Pre-generate Noise for Stability ---
-        # Heston needs 2 drivers (Price Brownian, Vol Brownian)
-        # Shape: (2, n_steps, n_paths)
+        # Pre-generate noise for CRN variance reduction
         rng = np.random.default_rng(seed)
-        # We assume the model needs 2 streams (Euler/CRN kernel expects this)
         Z_CRN = rng.standard_normal((2, n_steps, n_paths))
         
-        # 1. Base Price
-        # We pass 'noise=Z_CRN' to force the kernel to use these exact numbers
+        # Base Price
         res_curr = self.price(option, n_paths, n_steps, noise=Z_CRN)
         
-        # 2. Delta & Gamma (Spot Bumps)
-        # Bump Up
+        # Delta & Gamma (Spot Bumps)
         self.process.market = replace(original_market, S0 = original_S0 + epsilon_s)
         res_up = self.price(option, n_paths, n_steps, noise=Z_CRN)
         
-        # Bump Down
         self.process.market = replace(original_market, S0 = original_S0 - epsilon_s)
         res_down = self.price(option, n_paths, n_steps, noise=Z_CRN)
         
-        # 3. Vega (Vol Bump)
+        # Vega (Vol Bump)
         self.process.market = replace(original_market, v0 = original_market.v0 + epsilon_v, S0=original_S0)
         res_vega = self.price(option, n_paths, n_steps, noise=Z_CRN)
         
-        # Restore Market
+        # Restore Market State
         self.process.market = original_market
         
-        # Calc Finite Differences
         delta = (res_up.price - res_down.price) / (2 * epsilon_s)
         gamma = (res_up.price - 2 * res_curr.price + res_down.price) / (epsilon_s ** 2)
         vega = (res_vega.price - res_curr.price) / epsilon_v
