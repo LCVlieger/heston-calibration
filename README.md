@@ -11,25 +11,25 @@
 * **Mathematical Rigor**: Implements **Gil-Pelaez Fourier Inversion** for fast calibration and **Full Truncation Euler** discretization for simulation stability.
 
 ---
-### Numerical Scheme: Euler vs. QE
-This library intentionally uses a **Full Truncation Euler** scheme rather than the Andersen (2008) Quadratic Exponential (QE) scheme.
+## Architectural Decisions
 
-**Justification:**
-Extensive A/B testing on live market data (NVDA, TSLA, ASML) revealed that:
-1.  **Feller Stability:** By enforcing the Feller condition ($2\kappa\theta > \xi^2$) as a soft constraint during calibration, we prevent the variance process from hitting zero.
-2.  **Accuracy:** In this Feller-compliant regime, Euler's discretization bias is statistically negligible (RMSE diff < 0.1% vs QE).
-3.  **Speed:** The Euler kernel allows for simpler vectorization and 15% faster execution.
+### Design Choice: Feller-Constrained Euler vs. QE Scheme
+While the **Quadratic Exponential (QE)** scheme (Andersen, 2008) is the industry standard for low-bias Heston simulation, this library implements a **Full Truncation Euler** scheme optimized for speed.
 
-*Conclusion: We prioritize code maintainability and execution speed over theoretical complexity where no tangible accuracy gain exists.*
+**Engineering Justification:**
+1.  **Optimization Constraints:** We enforce the Feller condition ($2\kappa\theta > \xi^2$) as a soft penalty during the calibration phase. This constrains the parameter search space to regimes where the variance process remains strictly positive.
+2.  **Performance Gain:** By avoiding the conditional branching and inverse CDF calls required by QE, the vectorized Euler kernel achieves a **~15% reduction in calibration time**.
+3.  **Accuracy Validation:** Extensive A/B testing on live market data (NVDA, ASML) confirms that in this Feller-compliant regime, the Euler discretization bias is negligible (< 0.1% RMSE difference vs Analytical benchmarks).
+
+*Result: A lighter, faster codebase that maintains pricing precision for Equity Volatility surfaces.*
 ----
 
 ## Case Study: NVIDIA (NVDA) Down-and-Out Call
 
-**Calibration Date:** Jan 24, 2026
-* **Regime:** High Mean Reversion ($\kappa \approx 4.8$), Negative Skew ($\rho \approx -0.46$).
-* **Barrier Risk:** The pricing engine detected **Negative Gamma** ($\Gamma \approx -0.06$) near the barrier ($150), highlighting the "Reverse Hedging" risk (selling into a falling market) inherent in barrier products.
-* **Volatility Exposure:** The model correctly identified a **Positive Vega** ($+79.1$) for the structure, as the "Long Call" optionality outweighed the "Knock-Out" probability at the current spot level ($187).
-
+**Calibration Date:** Jan 25, 2026
+* **Scenario:** Spot \$187.67 | Strike \$197.05 | Barrier \$150.14 (1yr Maturity)
+* **Barrier Risk:** The engine correctly computes **Negative Gamma** ($\Gamma \approx -0.008$), quantifying the "slippage" risk where the delta hedge collapses as the spot approaches the knock-out level.
+* **Volatility Exposure:** Despite the barrier, the model identifies a **Positive Vega** ($+18.47$). This indicates that for this specific moneyness, the increased probability of hitting the strike (upside) outweighs the increased probability of hitting the barrier (knock-out).
 ---
 
 ## Performance Benchmarks

@@ -11,7 +11,8 @@ dependencies = [
     "scipy",
     "numba",
     "matplotlib",
-    "pytest"
+    "pytest",
+    "yfinance"  
 ]
 
 [tool.setuptools.packages.find]
