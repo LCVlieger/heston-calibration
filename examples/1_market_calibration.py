@@ -97,7 +97,7 @@ def plot_surface(S0, r, q, params, ticker, filename):
     # Reality check: Liquid equity surfaces rarely exceed 50%-150% moneyness [0.5, 1.5].
     # Time T: 0.1 to 3.0 years covers the standard liquid term structure.
     M_range = np.linspace(0.4, 2.5, 100)
-    T_range = np.linspace(0.1, 2.5, 100)
+    T_range = np.linspace(0.12, 2.5, 100)
     
     X, Y = np.meshgrid(M_range, T_range)
     Z = np.zeros_like(X)
@@ -139,8 +139,8 @@ def plot_surface(S0, r, q, params, ticker, filename):
 
         # 2. Camera and Bounds
         ax.dist = 11  # Pull back camera
-        ax.set_xlim(0.3, 2.5)
-        ax.set_ylim(2.5, 0.05) # Inverted Y for Near Maturity at bottom/front if desired, or standard
+        ax.set_xlim(0.4, 2.5)
+        ax.set_ylim(2.5, 0.12) # Inverted Y for Near Maturity at bottom/front if desired, or standard
         
         # 3. Labels and Titles
         ax.set_title(rf"Heston IV Surface $\sigma(T, K/S)$: {ticker}", color='white', y=1.0, fontsize=14, fontweight='bold')
