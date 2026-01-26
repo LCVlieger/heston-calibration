@@ -96,8 +96,8 @@ def plot_surface(S0, r, q, params, ticker, filename):
     # Moneyness M = K/S. 
     # Reality check: Liquid equity surfaces rarely exceed 50%-150% moneyness [0.5, 1.5].
     # Time T: 0.1 to 3.0 years covers the standard liquid term structure.
-    M_range = np.linspace(0.5, 1.6, 60)
-    T_range = np.linspace(0.1, 3.0, 60)
+    M_range = np.linspace(0.4, 2.5, 100)
+    T_range = np.linspace(0.1, 2.5, 100)
     
     X, Y = np.meshgrid(M_range, T_range)
     Z = np.zeros_like(X)
@@ -110,15 +110,20 @@ def plot_surface(S0, r, q, params, ticker, filename):
             M_val = X[i, j]
             K_val = S0 * M_val
             
-            # Heston Analytic Price
             price = HestonAnalyticalPricer.price_european_call(
                 S0, K_val, T_val, r, q, kappa, theta, xi, rho, v0
             )
             
-            # Invert for Implied Volatility
             try:
                 iv = implied_volatility(price, S0, K_val, T_val, r, q)
-                Z[i, j] = iv
+                
+                # [FIX] Sanity Check / Filtering
+                # Remove artifacts where solver converged to bounds (0.0 or > 200%)
+                if 0.01 < iv < 2.5:  
+                    Z[i, j] = iv
+                else:
+                    Z[i, j] = np.nan
+                    
             except Exception:
                 Z[i, j] = np.nan
 
@@ -134,18 +139,20 @@ def plot_surface(S0, r, q, params, ticker, filename):
 
         # 2. Camera and Bounds
         ax.dist = 11  # Pull back camera
-        ax.set_xlim(0.5, 1.6)
-        ax.set_ylim(3.0, 0.1) # Inverted Y for Near Maturity at bottom/front if desired, or standard
+        ax.set_xlim(0.3, 2.5)
+        ax.set_ylim(2.5, 0.05) # Inverted Y for Near Maturity at bottom/front if desired, or standard
         
         # 3. Labels and Titles
-        ax.set_title(f"Heston IV Surface $\sigma(T, K/S)$: {ticker}", color='white', y=1.0, fontsize=14, fontweight='bold')
+        ax.set_title(rf"Heston IV Surface $\sigma(T, K/S)$: {ticker}", color='white', y=1.0, fontsize=14, fontweight='bold')
         ax.set_xlabel('Moneyness ($K/S_0$)', color='white', labelpad=15)
         ax.set_ylabel('Maturity ($T$ Years)', color='white', labelpad=15)
         ax.set_zlabel(r'Implied Volatility (%)', color='white', labelpad=15)
 
         # 4. View Perspective
-        ax.view_init(elev=28, azim=-138)
+        ax.view_init(elev=20, azim=-103.5)
         
+        z_lbl = ax.set_zlabel(r'Implied Volatility $\sigma(T, M)$', color='white', labelpad=10)
+
         # 5. Pane and Grid Styling (Transparent Panes)
         ax.xaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
         ax.yaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
@@ -159,9 +166,10 @@ def plot_surface(S0, r, q, params, ticker, filename):
         cbar.ax.yaxis.set_tick_params(color='white')
 
         # 7. Export
-        output_file = f"{filename}_surface_styled.png"
-        plt.savefig(output_file, dpi=300, facecolor='black', bbox_inches='tight', pad_inches=0.2)
+        output_file = f"{filename}_surface.png"
+        plt.savefig(output_file, dpi=300, facecolor='black', bbox_inches='tight', pad_inches=0.1, bbox_extra_artists=[z_lbl])
         # plt.show() # Optional: Comment out for batch processing
+        plt.draw()
         plt.close()
 
 def main():
@@ -178,7 +186,7 @@ def main():
     log(f"Target: {ticker} (S0={S0:.2f}) | N={len(options)}")
     
     avg_mkt_price = np.mean([o.market_price for o in options]) if options else 1.0
-    r, q = 0.045, 0.015
+    r, q = 0.045, 0.0002
 
     # Setup Calibrators
     cal_ana = HestonCalibrator(S0, r, q)
