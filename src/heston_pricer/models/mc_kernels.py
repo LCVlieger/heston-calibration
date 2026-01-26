@@ -63,10 +63,6 @@ def generate_heston_paths(S0, r, q, v0, kappa, theta, xi, rho, T, n_paths, n_ste
 
 @jit(nopython=True, cache=True, fastmath=True)
 def generate_heston_paths_crn(S0, r, q, v0, kappa, theta, xi, rho, T, n_paths, n_steps, noise_matrix):
-    """
-    Kernel for calibration using 'Common Random Numbers' (CRN). Pre-generates noise matrix. 
-    This is needed for stability during the optimization. 
-    """
     dt = T / n_steps
     sqrt_dt = np.sqrt(dt)
     c1, c2 = rho, np.sqrt(1 - rho**2)
@@ -81,11 +77,17 @@ def generate_heston_paths_crn(S0, r, q, v0, kappa, theta, xi, rho, T, n_paths, n
         Z2 = noise_matrix[1, j]
         Zv = c1 * Z1 + c2 * Z2
         
-        v_pos = np.maximum(curr_v, 0.0)
-        curr_v += kappa * (theta - v_pos) * dt + xi * np.sqrt(v_pos) * sqrt_dt * Zv
+        # --- FIX: Capture v_t BEFORE updating ---
+        v_t = np.maximum(curr_v, 0.0) 
         
-        v_pos = np.maximum(curr_v, 0.0)
-        curr_s *= np.exp((r - q - 0.5 * v_pos) * dt + np.sqrt(v_pos) * sqrt_dt * Z1)
+        # Update Asset using v_t (Standard Euler)
+        # drift = (r - q - 0.5 * v_t) * dt
+        # diffusion = sqrt(v_t) * sqrt(dt) * Z1
+        curr_s *= np.exp((r - q - 0.5 * v_t) * dt + np.sqrt(v_t) * sqrt_dt * Z1)
+        
+        # Update Variance using v_t
+        curr_v += kappa * (theta - v_t) * dt + xi * np.sqrt(v_t) * sqrt_dt * Zv
+        
         prices[:, j + 1] = curr_s
         
     return prices

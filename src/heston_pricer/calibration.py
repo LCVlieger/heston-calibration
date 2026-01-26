@@ -14,7 +14,7 @@ class MarketOption:
     market_price: float
     option_type: str = "CALL" 
 
-
+# The analytical calibrator for the Heston model.  
 class HestonCalibrator:
     def __init__(self, S0: float, r: float, q: float = 0.0):
         self.S0 = S0
@@ -22,18 +22,21 @@ class HestonCalibrator:
         self.q = q
 
     def calibrate(self, options: List[MarketOption], init_guess: List[float] = None) -> Dict:
-        x0 = init_guess if init_guess else [2.0, 0.04, 0.5, -0.7, 0.04]
+        x0 = init_guess if init_guess else [3.0, 0.05, 0.3, -0.7, 0.04]
         bounds = [(0.5, 10.0), (0.001, 2.0), (0.01, 5.0), (-0.999, 0.0), (0.001, 2.0)]
 
         def objective(params):
             kappa, theta, xi, rho, v0 = params
-            # Soft Feller Constraint
+            # Soft constraint for feller condition. This soft constraint is added because
+            # we use a full truncation scheme which can get biased when the variance process hits zero. 
             penalty = 0.0
             if 2 * kappa * theta < xi**2: 
-                penalty = 1e6 * (abs(2 * kappa * theta - xi**2)**2)
+                penalty = 0e0 * (abs(2 * kappa * theta - xi**2)**2)
 
             sse = 0.0
             for opt in options:
+                # Calibration assumes EU call options 
+                # Can be extended later to puts and other liquid options. 
                 model_price = HestonAnalyticalPricer.price_european_call(
                     self.S0, opt.strike, opt.maturity, self.r, self.q,
                     kappa, theta, xi, rho, v0
@@ -43,19 +46,21 @@ class HestonCalibrator:
             
             return sse + penalty
 
-        # Real-time optimization feedback
+        # print the optimization steps during optimization. 
         def callback(xk):
             print(f"   [Analytical] k={xk[0]:.2f}, theta={xk[1]:.3f}, xi={xk[2]:.2f}, rho={xk[3]:.2f}, v0={xk[4]:.3f}", flush=True)
 
+        # We use the L-BFGS-B optimizer because it is gradient-based and can impose
+        # bounds on the parameters (box constraints). 
+        # See: (https://docs.scipy.org/doc/scipy-1.16.2/reference/generated/scipy.optimize.minimize.html)
         result = minimize(
             objective, x0, method='L-BFGS-B', bounds=bounds,
             callback=callback,
-            tol=1e-6, options={'ftol': 1e-9, 'eps': 1e-5, 'maxiter': 100}
+            tol=1e-6, options={'ftol': 1e-6, 'eps': 1e-5, 'maxiter': 100}
         )
-
-        return self._build_result(result, options)
-
-    def _build_result(self, result, options):
+        # Prices the options using the optimized parameters & calculates the "implied volatility sse"
+        # which is given by (1/#options)*sum__{i \in options} (iv_market[i] - iv_model[i])^2. 
+        # this is a good measure of fit accounting for heteroskedastic option prices 
         kappa, theta, xi, rho, v0 = result.x
         sse_iv, count = 0.0, 0
         for opt in options:
@@ -74,6 +79,7 @@ class HestonCalibrator:
             "rmse_iv": np.sqrt(sse_iv / count) if count > 0 else 0.0
         }
 
+# The Monte Carlo calibrator
 class HestonCalibratorMC:
     def __init__(self, S0: float, r: float, q: float = 0.0, n_paths: int = 30000, n_steps: int = 100):
         self.base_env = MarketEnvironment(S0, r, q) 
@@ -110,7 +116,8 @@ class HestonCalibratorMC:
         prices = []
         for i, opt in enumerate(self.options_cache):
             idx = self.time_indices[i]
-            # Assumes Call Options for simplicity
+            # Calibration assumes EU call options (same as in the analytical calibration). 
+            # Can be extended to puts and other liquid options. 
             payoff = np.maximum(paths[:, idx] - opt.strike, 0.0) 
             prices.append(np.mean(payoff) * np.exp(-self.process.market.r * opt.maturity))
         return prices
@@ -118,7 +125,7 @@ class HestonCalibratorMC:
     def objective(self, params):
         kappa, theta, xi, rho, v0 = params
         if (xi**2) - (2 * kappa * theta) > 0: 
-            penalty = 1000.0 * ((xi**2) - (2 * kappa * theta)) ** 2
+            penalty = 0e0 * ((xi**2) - (2 * kappa * theta)) ** 2
         else:
             penalty = 0.0
 
@@ -130,18 +137,19 @@ class HestonCalibratorMC:
         return sse + penalty
 
     def calibrate(self, options: List[MarketOption], init_guess: List[float] = None) -> Dict:
+        # precompute paths and print optimization steps
         self.options_cache = options
         self._precompute_batch_grid(options)
-        x0 = init_guess if init_guess else [2.0, 0.04, 0.5, -0.7, 0.04]
+        x0 = init_guess if init_guess else [3.0, 0.05, 0.3, -0.7, 0.04]
         bounds = [(0.5, 10.0), (0.001, 2.0), (0.01, 5.0), (-0.999, 0.0), (0.001, 2.0)]
-        
-        # Real-time optimization feedback
         def callback(xk):
              print(f"   [MonteCarlo] k={xk[0]:.2f}, theta={xk[1]:.3f}, xi={xk[2]:.2f}, rho={xk[3]:.2f}, v0={xk[4]:.3f}", flush=True)
-
+        
+        #again, a L-BFGS-B optimizer to handle gradients and parameter bounds / box constraints. 
+        #Use a slightly lower tolerance here because of the Monte Carlo noise.    
         result = minimize(
             self.objective, x0, method='L-BFGS-B', bounds=bounds, 
-            callback=callback, tol=1e-5
+            callback=callback, tol=1e-5, options={'ftol': 1e-6, 'eps': 1e-5, 'maxiter': 200}
         )
 
         final_mc_prices = self.get_prices(result.x)
@@ -154,10 +162,13 @@ class HestonCalibratorMC:
                 sse_iv += (iv_model - iv_mkt) ** 2
                 count += 1
         
+        # Ensure return structure contains all necessary metrics
         return {
             "kappa": result.x[0], "theta": result.x[1], "xi": result.x[2],
             "rho": result.x[3], "v0": result.x[4], 
-            "success": result.success, "rmse_iv": np.sqrt(sse_iv / count) if count > 0 else 0.0
+            "success": result.success, 
+            "fun": result.fun, # SSE
+            "rmse_iv": np.sqrt(sse_iv / count) if count > 0 else 0.0
         }
     
 def implied_volatility(price: float, S: float, K: float, T: float, r: float, q: float) -> float:
