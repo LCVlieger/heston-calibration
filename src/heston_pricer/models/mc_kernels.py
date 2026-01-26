@@ -33,8 +33,8 @@ def generate_paths_kernel(S0: float, r: float, q: float, sigma: float,
 @jit(nopython=True, cache=True, fastmath=True)
 def generate_heston_paths(S0, r, q, v0, kappa, theta, xi, rho, T, n_paths, n_steps):
     """
-    Heston Model simulation using a truncated Euler discretization (v_i+ = max(0,v_i)) ('Full truncation').
-    Reference: 'The Volatility Surface: A Practitioners Guide, Jim Gatheral, CH2 p.21. "
+    Heston Model simulation using a truncated Euler discretization.
+    FIXED: Ensures Asset update uses v_t (not v_{t+1}) to align with Ito calculus.
     """
     dt = T / n_steps
     sqrt_dt = np.sqrt(dt)
@@ -51,12 +51,15 @@ def generate_heston_paths(S0, r, q, v0, kappa, theta, xi, rho, T, n_paths, n_ste
         Z2 = np.random.standard_normal(n_paths)
         Zv = c1 * Z1 + c2 * Z2
         
-
-        v_pos = np.maximum(curr_v, 0.0)
-        curr_v += kappa * (theta - v_pos) * dt + xi * np.sqrt(v_pos) * sqrt_dt * Zv
+        # CORRECTED: Capture v_t before updating to v_{t+1}
+        v_t = np.maximum(curr_v, 0.0)
         
-        v_pos = np.maximum(curr_v, 0.0)
-        curr_s *= np.exp((r - q - 0.5 * v_pos) * dt + np.sqrt(v_pos) * sqrt_dt * Z1)
+        # Update Asset using v_t
+        curr_s *= np.exp((r - q - 0.5 * v_t) * dt + np.sqrt(v_t) * sqrt_dt * Z1)
+
+        # Update Variance using v_t (Euler)
+        curr_v += kappa * (theta - v_t) * dt + xi * np.sqrt(v_t) * sqrt_dt * Zv
+        
         prices[:, j + 1] = curr_s
         
     return prices

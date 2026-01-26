@@ -1,8 +1,9 @@
 import numpy as np
 from dataclasses import dataclass, replace
-from typing import Dict
+from typing import Dict, Tuple
 from ..instruments import Option
 from .process import StochasticProcess
+from ..calibration import implied_volatility
 
 @dataclass
 class PricingResult:
