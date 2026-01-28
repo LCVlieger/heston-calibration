@@ -24,22 +24,18 @@ def fetch_options(ticker_symbol: str, target_size: int = 150) -> Tuple[List[Mark
 
     today = datetime.now()
     
-    # 2. STABILIZED MATURITY SELECTION (Option A)
-    # Filter T < 45 days to prevent "Heston Trap" (Xi explosion)
-    MIN_T_YEARS = 55 / 365.25  # ~0.123 years
+    # 2. STABILIZED MATURITY SELECTION
+    MIN_T_YEARS = 21 / 365.25  # Lowered slightly to 21d to ensure data flow
     
-    short_dates = []   # 45 days - 6 months
-    med_dates = []     # 6-18 months
-    long_dates = []    # > 18 months
+    short_dates = []   
+    med_dates = []     
+    long_dates = []    
 
     for exp_str in expirations:
         try:
             d = datetime.strptime(exp_str, "%Y-%m-%d")
             T = (d - today).days / 365.25
             
-            # [CRITICAL FIX] 
-            # Drop everything below 45 days. 
-            # These options require Jump-Diffusion (Bates), not Heston.
             if T < MIN_T_YEARS: continue 
             
             if T < 0.5: short_dates.append(exp_str)
@@ -49,7 +45,6 @@ def fetch_options(ticker_symbol: str, target_size: int = 150) -> Tuple[List[Mark
 
     selected_dates = []
     
-    # Even spacing helper
     def pick_evenly(lst, n):
         if len(lst) <= n: return lst
         indices = np.linspace(0, len(lst)-1, n, dtype=int)
@@ -57,14 +52,13 @@ def fetch_options(ticker_symbol: str, target_size: int = 150) -> Tuple[List[Mark
 
     selected_dates.extend(pick_evenly(short_dates, 3))
     selected_dates.extend(pick_evenly(med_dates, 4))
-    selected_dates.extend(long_dates) # Keep all LEAPS
+    selected_dates.extend(long_dates) 
     
     selected_dates = sorted(list(set(selected_dates)))
-    print(f"Scanning {len(selected_dates)} maturities (Filtered T < 14d)...")
+    print(f"Scanning {len(selected_dates)} maturities...")
 
     # 3. CONSTRAINED MONEYNESS SEARCH
-    # Previous: [0.6 ... 1.6] -> New: [0.75 ... 1.45]
-    # Reason: 0.6 delta=1 calls have no vol info. 1.6 calls are often noise.
+    # Expanded slightly to ensure we catch wings if ATM is missing in fallback
     target_moneyness = [0.75, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.35, 1.45]
     
     market_options = []
@@ -74,25 +68,32 @@ def fetch_options(ticker_symbol: str, target_size: int = 150) -> Tuple[List[Mark
             exp_date = datetime.strptime(exp_str, "%Y-%m-%d")
             T = (exp_date - today).days / 365.25
             
-            chain = ticker.option_chain(exp_str).calls
-            if chain.empty: continue
+            # Get RAW chain first
+            raw_chain = ticker.option_chain(exp_str).calls
+            if raw_chain.empty: continue
 
-            # [FILTER] Liquidity & Data Integrity
-            # 1. Open Interest > 50 (Consensus check)
-            # 2. Bid > 0.05 (Penny noise check) - CRITICAL for Heston stability
-            mask = (chain['openInterest'] > 50) & (chain['bid'] > 0.05)
+            # --- LOGIC BRANCHING ---
             
-            # Relax OI for LEAPS (T > 1.5) as they are naturally thinner
+            # PRIMARY PATH: Your Strict Logic
+            mask_strict = (raw_chain['openInterest'] > 50) & (raw_chain['bid'] > 0.05)
             if T > 1.5:
-                mask = (chain['openInterest'] > 0) & (chain['bid'] > 0.05)
-                
-            chain = chain[mask]
+                mask_strict = (raw_chain['openInterest'] > 0) & (raw_chain['bid'] > 0.05)
+            
+            chain = raw_chain[mask_strict].copy()
+            use_fallback = False
+
+            # ELSE: Fallback if strict yielded nothing
+            if chain.empty:
+                # Relaxed Mask: Just need a valid price
+                mask_relaxed = (raw_chain['lastPrice'] > 0) | (raw_chain['bid'] > 0)
+                chain = raw_chain[mask_relaxed].copy()
+                use_fallback = True # Flag to trigger relaxed logic inside loop
+            
             if chain.empty: continue
 
             for m in target_moneyness:
                 target_k = S0 * m
                 
-                # Find closest available strike
                 chain['dist'] = (chain['strike'] - target_k).abs()
                 candidates = chain.nsmallest(1, 'dist')
                 
@@ -101,24 +102,31 @@ def fetch_options(ticker_symbol: str, target_size: int = 150) -> Tuple[List[Mark
                 row = candidates.iloc[0]
                 
                 # [FILTER] Proximity Check
-                # If closest strike is > 7.5% away from target, skip (don't force fit)
-                if row['dist'] > (S0 * 0.075): continue
+                # Strict: 7.5% | Fallback: 15%
+                limit_dist = S0 * 0.15 if use_fallback else S0 * 0.075
+                if row['dist'] > limit_dist: continue
 
                 # Pricing Logic
                 bid, ask, last = row.get('bid', 0), row.get('ask', 0), row['lastPrice']
                 
                 # [FILTER] Spread Integrity
-                # If Spread > 40% of mid-price, data is too noisy.
                 mid = (bid + ask) / 2.0
                 spread = ask - bid
-                if mid > 0 and (spread / mid) > 0.4: continue
+                
+                # Only apply strict spread check if NOT in fallback mode
+                if not use_fallback:
+                    if mid > 0 and (spread / mid) > 0.4: continue
 
                 price = mid if (bid > 0 and ask > 0) else last
                 
-                # [FILTER] Hard Arbitrage Check
-                # Price must be > Intrinsic + Time Value buffer
+                # [FILTER] Arbitrage Check
                 intrinsic = max(S0 - row['strike'], 0)
-                if price <= intrinsic: continue 
+                
+                if price <= intrinsic:
+                    if not use_fallback:
+                        continue # Strict: Skip
+                    else:
+                        price = intrinsic + 0.05 # Fallback: Repair
 
                 # Avoid duplicates
                 is_dupe = any(o.strike == row['strike'] and o.maturity == T for o in market_options)
