@@ -59,14 +59,13 @@ def refine_calibration(S0, r, q, initial_params, market_options):
     """
     Filters outliers based on initial parameters and re-runs calibration.
     """
-    kappa = initial_params['kappa'] - 1.3
+    kappa = initial_params['kappa'] 
     theta = initial_params['theta']
     xi = initial_params['xi']
     rho = initial_params['rho']
     v0 = initial_params['v0']
     
     p_init_vals = [kappa, theta, xi, rho, v0]
-    
     print(f"\n[Refinement] Checking {len(market_options)} options against loaded model...")
     clean_options = []
     dropped = 0
