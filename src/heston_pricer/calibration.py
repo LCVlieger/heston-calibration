@@ -149,7 +149,7 @@ class HestonCalibratorMC:
         #Use a slightly lower tolerance here because of the Monte Carlo noise.    
         result = minimize(
             self.objective, x0, method='L-BFGS-B', bounds=bounds, 
-            callback=callback, tol=1e-6, options={'ftol': 1e-7, 'eps': 1e-7, 'maxiter': 200}
+            callback=callback, tol=1e-7, options={'ftol': 1e-7, 'eps': 1e-7, 'maxiter': 200}
         )
 
         final_mc_prices = self.get_prices(result.x)

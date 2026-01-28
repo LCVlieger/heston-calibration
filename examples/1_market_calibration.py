@@ -157,7 +157,7 @@ def plot_surface(S0, r, q, params, ticker, filename, market_options=None):
                 try:
                     iv_mod = implied_volatility(p_mod, S0, opt.strike, opt.maturity, r, q)
                 except: iv_mod = 0 
-                
+                    
                 # 1. Safety: Handle NaNs explicitly
                 if np.isnan(iv_mod):
                     continue
@@ -244,7 +244,7 @@ def plot_surface(S0, r, q, params, ticker, filename, market_options=None):
 
 def main():
     clear_numba_cache()
-    ticker = "NVDA" 
+    ticker =  "NVDA" # "NVDA" 
     
     # Fetch Market Data
     options, S0 = fetch_options(ticker)
@@ -256,12 +256,12 @@ def main():
     log(f"Target: {ticker} (S0={S0:.2f}) | N={len(options)}")
     
     avg_mkt_price = np.mean([o.market_price for o in options]) if options else 1.0
-    r, q = 0.045, 0.0002
+    r, q = 0.045, 0.0002 #0.0002
 
     # Setup Calibrators
     cal_ana = HestonCalibrator(S0, r, q)
     cal_mc = HestonCalibratorMC(S0, r, q, n_paths=50_000, n_steps=252)
-    init_guess = [3.5, 0.240, 0.6, -0.7, 0.14] #[3.0, 0.05, 0.3, -0.7, 0.04] 
+    init_guess = [2.0, 0.06, 0.2, -0.5, 0.02]  # [3.5, 0.240, 0.6, -0.7, 0.14] #[3.0, 0.05, 0.3, -0.7, 0.04] 
 
     # --- 1. Analytical Calibration ---
     t0 = time.time()    
