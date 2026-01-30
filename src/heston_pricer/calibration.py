@@ -6,6 +6,7 @@ from typing import List, Dict
 from .analytics import HestonAnalyticalPricer
 from .market import MarketEnvironment
 from .models.process import HestonProcess
+from scipy.interpolate import interp1d
 
 @dataclass
 class MarketOption:
@@ -14,11 +15,29 @@ class MarketOption:
     market_price: float
     option_type: str = "CALL" 
 
+class SimpleYieldCurve:
+    def __init__(self, tenors: List[float], rates: List[float]):
+        self.tenors = tenors  # Store raw data for JSON
+        self.rates = rates    # Store raw data for JSON
+        self.curve = interp1d(
+            tenors, rates, 
+            kind='linear', 
+            fill_value="extrapolate" 
+        )
+
+    def get_rate(self, T: float) -> float:
+        if T < 1e-5: return float(self.curve(0.0))
+        return float(self.curve(T))
+
+    def to_dict(self):
+        """Helper to convert object to serializable dict."""
+        return {"tenors": self.tenors, "rates": self.rates}
+    
 # The analytical calibrator for the Heston model.  
 class HestonCalibrator:
-    def __init__(self, S0: float, r: float, q: float = 0.0):
+    def __init__(self, S0: float, r_curve: SimpleYieldCurve, q: float = 0.0):
         self.S0 = S0
-        self.r = r
+        self.r_curve = r_curve # Now an object, not a float
         self.q = q
 
     def calibrate(self, options: List[MarketOption], init_guess: List[float] = None) -> Dict:
@@ -34,19 +53,19 @@ class HestonCalibrator:
             # Penalty for Feller violation: 2*k*th > xi^2
             feller_gap = 2 * kappa * theta - xi**2
             if feller_gap < 1e-5:
-                penalty += 0 * (1e-5 - feller_gap)**2
+                penalty += 0.0 * (1e-5 - feller_gap)**2
 
             total_error = 0.0
-            
             for opt in options:
+                r_T = self.r_curve.get_rate(opt.maturity)
                 # 1. Price Model
                 if opt.option_type == "PUT":
                     model_p = HestonAnalyticalPricer.price_european_put(
-                        self.S0, opt.strike, opt.maturity, self.r, self.q, kappa, theta, xi, rho, v0
+                        self.S0, opt.strike, opt.maturity, r_T, self.q, kappa, theta, xi, rho, v0
                     )
                 else:
                     model_p = HestonAnalyticalPricer.price_european_call(
-                        self.S0, opt.strike, opt.maturity, self.r, self.q, kappa, theta, xi, rho, v0
+                        self.S0, opt.strike, opt.maturity, r_T, self.q, kappa, theta, xi, rho, v0
                     )
                 
                 # 2. Adaptive Weighting (The Fix)
@@ -55,11 +74,11 @@ class HestonCalibrator:
                 
                 # Increase weight for OTM options (the wings) which define rho and xi
                 # Standard ATM weight = 1.0; OTM weights scale up
-                wing_weight = 1.0 + 5.0 * (moneyness**2)
+                wing_weight = 1.0 + 5.0 * (moneyness**2) #5.0 for SPX
                 
                 # Relative Price Error is more stable than IV-conversion in-loop
                 # This prevents the solver from getting stuck in IV-solver noise
-                relative_error = (model_p - opt.market_price) / opt.market_price
+                relative_error = (model_p - opt.market_price) / (opt.market_price + 1e-5)
                 
                 total_error += wing_weight * (relative_error**2)
 
@@ -78,17 +97,18 @@ class HestonCalibrator:
         kappa, theta, xi, rho, v0 = result.x
         sse_iv, count = 0.0, 0
         for opt in options:
+            r_T = self.r_curve.get_rate(opt.maturity)
             if opt.option_type == "PUT":
                 model_price = HestonAnalyticalPricer.price_european_put(
-                    self.S0, opt.strike, opt.maturity, self.r, self.q, kappa, theta, xi, rho, v0
+                    self.S0, opt.strike, opt.maturity, r_T, self.q, kappa, theta, xi, rho, v0
                 )
             else:
                 model_price = HestonAnalyticalPricer.price_european_call(
-                    self.S0, opt.strike, opt.maturity, self.r, self.q, kappa, theta, xi, rho, v0
+                    self.S0, opt.strike, opt.maturity, r_T, self.q, kappa, theta, xi, rho, v0
                 )
             
-            iv_mkt = implied_volatility(opt.market_price, self.S0, opt.strike, opt.maturity, self.r, self.q, opt.option_type)
-            iv_model = implied_volatility(model_price, self.S0, opt.strike, opt.maturity, self.r, self.q, opt.option_type)
+            iv_mkt = implied_volatility(opt.market_price, self.S0, opt.strike, opt.maturity, r_T, self.q, opt.option_type)
+            iv_model = implied_volatility(model_price, self.S0, opt.strike, opt.maturity, r_T, self.q, opt.option_type)
             
             if iv_mkt > 0 and iv_model > 0:
                 sse_iv += (iv_model - iv_mkt) ** 2

@@ -10,12 +10,12 @@ from scipy.ndimage import gaussian_filter
 
 # Local package imports
 try:
-    from heston_pricer.calibration import implied_volatility, HestonCalibrator
+    from heston_pricer.calibration import implied_volatility, HestonCalibrator, SimpleYieldCurve
     from heston_pricer.analytics import HestonAnalyticalPricer
 except ImportError:
     import sys
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
-    from heston_pricer.calibration import implied_volatility, HestonCalibrator
+    from heston_pricer.calibration import implied_volatility, HestonCalibrator, SimpleYieldCurve
     from heston_pricer.analytics import HestonAnalyticalPricer
 
 """
@@ -31,7 +31,7 @@ class ReconstructedOption:
         self.strike = float(strike)
         self.maturity = float(maturity)
         self.market_price = float(price)
-        self.option_type = str(option_type)  # <--- Added missing attribute
+        self.option_type = str(option_type)
 
 def load_latest_calibration():
     patterns = ['results/calibration_*_meta.json', 'calibration_*_meta.json']
@@ -46,18 +46,26 @@ def load_latest_calibration():
     
     with open(latest_meta, 'r') as f: data = json.load(f)
     
+    # --- FIX: Reconstruct SimpleYieldCurve from JSON Dict ---
+    curve_data = data['market']['r']
+    if isinstance(curve_data, dict):
+        # New format with curve
+        r_curve = SimpleYieldCurve(curve_data['tenors'], curve_data['rates'])
+    else:
+        # Fallback for old scalar format
+        r_curve = SimpleYieldCurve([0.0, 30.0], [float(curve_data), float(curve_data)])
+
     csv_file = f"{base_name}_prices.csv"
     market_options = []
     if os.path.exists(csv_file):
         df = pd.read_csv(csv_file)
         for _, row in df.iterrows():
-            # Safe get for 'Type' to support older CSVs
             otype = row['Type'] if 'Type' in row else "CALL"
             market_options.append(ReconstructedOption(row['K'], row['T'], row['Mkt'], otype))
 
-    return data, market_options, base_name
+    return data, r_curve, market_options, base_name
 
-def refine_calibration(S0, r, q, initial_params, market_options):
+def refine_calibration(S0, r_curve, q, initial_params, market_options):
     """
     Filters outliers based on initial parameters and re-runs calibration.
     """
@@ -76,19 +84,21 @@ def refine_calibration(S0, r, q, initial_params, market_options):
     
     for opt in market_options:
         try:
-            # --- FIX: Dispatch correctly based on option type ---
+            # --- FIX: Get maturity-specific rate ---
+            r_T = r_curve.get_rate(opt.maturity)
+
             if opt.option_type == "PUT":
                 p_mod = HestonAnalyticalPricer.price_european_put(
-                    S0, opt.strike, opt.maturity, r, q, kappa, theta, xi, rho, v0
+                    S0, opt.strike, opt.maturity, r_T, q, kappa, theta, xi, rho, v0
                 )
             else:
                 p_mod = HestonAnalyticalPricer.price_european_call(
-                    S0, opt.strike, opt.maturity, r, q, kappa, theta, xi, rho, v0
+                    S0, opt.strike, opt.maturity, r_T, q, kappa, theta, xi, rho, v0
                 )
             
-            # Pass option_type to implied_volatility
-            iv_mod = implied_volatility(p_mod, S0, opt.strike, opt.maturity, r, q, opt.option_type)
-            iv_mkt = implied_volatility(opt.market_price, S0, opt.strike, opt.maturity, r, q, opt.option_type)
+            # Use r_T for IV calculation
+            iv_mod = implied_volatility(p_mod, S0, opt.strike, opt.maturity, r_T, q, opt.option_type)
+            iv_mkt = implied_volatility(opt.market_price, S0, opt.strike, opt.maturity, r_T, q, opt.option_type)
             
             if np.isnan(iv_mod) or np.isnan(iv_mkt) or iv_mod == 0.0 or iv_mkt == 0.0: 
                 dropped += 1
@@ -104,14 +114,15 @@ def refine_calibration(S0, r, q, initial_params, market_options):
             
     print(f"-> Dropped {dropped} extreme outliers. Re-calibrating on {len(clean_options)} instruments...")
     
-    cal = HestonCalibrator(S0, r, q)
+    # --- FIX: Pass r_curve to Calibrator ---
+    cal = HestonCalibrator(S0, r_curve, q)
     t0 = time.time()
     res_final = cal.calibrate(clean_options, init_guess=p_init_vals)
     print(f"-> Optimization Complete ({time.time()-t0:.2f}s)")
     
     return res_final, clean_options, dropped
 
-def plot_surface_professional(S0, r, q, params, ticker, filename, market_options, data_full, dropped_count):
+def plot_surface_professional(S0, r_curve, q, params, ticker, filename, market_options, data_full, dropped_count):
     kappa, theta, xi, rho, v0 = params['kappa'], params['theta'], params['xi'], params['rho'], params['v0']
 
     # --- 1. CONFIGURATION ---
@@ -125,16 +136,19 @@ def plot_surface_professional(S0, r, q, params, ticker, filename, market_options
     Z = np.zeros_like(X)
 
     # --- 2. CALCULATION ---
-    # We plot the Call surface as the canonical representation
     print(f"-> Generating Surface for: kappa={kappa:.2f}, xi={xi:.2f}, v0={v0:.3f}")
     for i in range(X.shape[0]):
         for j in range(X.shape[1]):
             T_val, M_val = Y[i, j], X[i, j]
+            
+            # --- FIX: Fetch rate for this grid point maturity ---
+            r_T = r_curve.get_rate(T_val)
+
             price = HestonAnalyticalPricer.price_european_call(
-                S0, S0 * M_val, T_val, r, q, kappa, theta, xi, rho, v0
+                S0, S0 * M_val, T_val, r_T, q, kappa, theta, xi, rho, v0
             )
             try:
-                iv = implied_volatility(price, S0, S0 * M_val, T_val, r, q, "CALL")
+                iv = implied_volatility(price, S0, S0 * M_val, T_val, r_T, q, "CALL")
                 Z[i, j] = iv if 0.01 < iv < 2.5 else np.nan
             except:
                 Z[i, j] = np.nan
@@ -168,8 +182,9 @@ def plot_surface_professional(S0, r, q, params, ticker, filename, market_options
             for opt in plot_opts:
                 m_mkt, t_mkt = opt.strike / S0, opt.maturity
                 try:
-                    # --- FIX: Correct IV calculation for Puts in the plot ---
-                    iv_mkt = implied_volatility(opt.market_price, S0, opt.strike, opt.maturity, r, q, opt.option_type)
+                    # --- FIX: Use r_T for accurate needle height ---
+                    r_T = r_curve.get_rate(opt.maturity)
+                    iv_mkt = implied_volatility(opt.market_price, S0, opt.strike, opt.maturity, r_T, q, opt.option_type)
                     if iv_mkt < 0.01 or iv_mkt > 2.5: continue
                 except: continue
 
@@ -211,7 +226,6 @@ def plot_surface_professional(S0, r, q, params, ticker, filename, market_options
 
         # --- 5. PERFORMANCE METRICS OVERLAY ---
         mc_res = data_full.get('monte_carlo_results', {})
-        # Handle cases where MC might have failed/not run
         mc_rmse = mc_res.get('rmse_iv', 0) if isinstance(mc_res, dict) else 0.0
 
         ax.set_xlabel('Moneyness ($K/S_0$)', color='white', labelpad=10)
@@ -232,15 +246,18 @@ def plot_surface_professional(S0, r, q, params, ticker, filename, market_options
 
 def main():
     try:
-        data, market_options, base_name = load_latest_calibration()
-        S0, r, q = data['market']['S0'], data['market']['r'], data['market']['q']
+        # --- FIX: Receive r_curve from loader ---
+        data, r_curve, market_options, base_name = load_latest_calibration()
+        S0, q = data['market']['S0'], data['market']['q']
         
         initial_params = data.get('monte_carlo_results', data.get('analytical'))
         ticker = base_name.split("calibration_")[1].split("_")[0] if "calibration_" in base_name else "Asset"
         
-        new_params, clean_options, dropped = refine_calibration(S0, r, q, initial_params, market_options)
+        # --- FIX: Pass r_curve to refiner ---
+        new_params, clean_options, dropped = refine_calibration(S0, r_curve, q, initial_params, market_options)
         
-        plot_surface_professional(S0, r, q, new_params, ticker, base_name, clean_options, data, dropped)
+        # --- FIX: Pass r_curve to plotter ---
+        plot_surface_professional(S0, r_curve, q, new_params, ticker, base_name, clean_options, data, dropped)
         
     except Exception as e:
         print(f"[Error] {e}")

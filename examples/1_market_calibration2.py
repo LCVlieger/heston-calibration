@@ -12,7 +12,7 @@ from scipy.ndimage import gaussian_filter
 
 # Local package imports
 try:
-    from heston_pricer.calibration import HestonCalibrator, implied_volatility
+    from heston_pricer.calibration import HestonCalibrator, implied_volatility, SimpleYieldCurve
     from heston_pricer.analytics import HestonAnalyticalPricer
     from heston_pricer.data import fetch_options
     from heston_pricer.instruments import EuropeanOption, OptionType
@@ -26,60 +26,61 @@ Calibrates Heston parameters to live market data (NVDA/SPX) and generates
 a publication-grade volatility surface visualization.
 """
 
-def save_results(ticker, S0, r, q, res_ana, options):
+def save_results(ticker, S0, r_curve, q, res_ana, options):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_name = f"calibration_{ticker}_{timestamp}"
     
-    # Save Metadata
+    # --- 1. FIX: Save Metadata (Convert Curve to Dict) ---
     with open(f"{base_name}_meta.json", "w") as f: 
         json.dump({
-            "market": {"S0": S0, "r": r, "q": q}, 
+            "market": {
+                "S0": S0, 
+                "r": r_curve.to_dict(), # FIX: Call to_dict() here
+                "q": q
+            }, 
             "analytical": res_ana, 
-            #"monte_carlo_results": res_mc 
         }, f, indent=4)
 
-    # --- 1. VALIDATION TABLE ---
-    #process_mc = HestonProcess(env_mc)
-    #pricer_mc = MonteCarloPricer(process_mc)
-
+    # --- 2. VALIDATION TABLE ---
     get_params_ana = lambda res: [res.get(k, 0) for k in ['kappa', 'theta', 'xi', 'rho', 'v0']]
     rows = []
     
-    print(f"\n[Validation] Re-pricing {len(options)} instruments with Monte Carlo engine...")
+    print(f"\n[Validation] Re-pricing {len(options)} instruments with Yield Curve...")
 
     for opt in options:
-        # Determine Option Type
         is_put = (opt.option_type == "PUT")
         inst_type = OptionType.PUT if is_put else OptionType.CALL
         
-        # Analytical Price (Dispatch)
+        # FIX: Get maturity-specific rate for this option
+        r_T = r_curve.get_rate(opt.maturity)
+        
+        # Analytical Price (Dispatch using r_T)
         if is_put:
-            p_ana = HestonAnalyticalPricer.price_european_put(S0, opt.strike, opt.maturity, r, q, *get_params_ana(res_ana))
+            p_ana = HestonAnalyticalPricer.price_european_put(
+                S0, opt.strike, opt.maturity, r_T, q, *get_params_ana(res_ana)
+            )
         else:
-            p_ana = HestonAnalyticalPricer.price_european_call(S0, opt.strike, opt.maturity, r, q, *get_params_ana(res_ana))
+            p_ana = HestonAnalyticalPricer.price_european_call(
+                S0, opt.strike, opt.maturity, r_T, q, *get_params_ana(res_ana)
+            )
             
-        steps = int(max(20, opt.maturity * 252)) 
-        instrument = EuropeanOption(opt.strike, opt.maturity, inst_type)
-        
-        # Monte Carlo Price
-        #mc_result = pricer_mc.price(instrument, n_paths=100_000, n_steps=steps)
-        #p_mc = mc_result.price
-        
-        # IV Calculation
-        iv_mkt = implied_volatility(opt.market_price, S0, opt.strike, opt.maturity, r, q, opt.option_type)
-        #iv_mc = implied_volatility(p_mc, S0, opt.strike, opt.maturity, r, q, opt.option_type)
+        # IV Calculation (Using r_T for 100% accuracy)
+        iv_mkt = implied_volatility(opt.market_price, S0, opt.strike, opt.maturity, r_T, q, opt.option_type)
 
         rows.append({
             "Type": opt.option_type,
-            "T": opt.maturity, "K": opt.strike, "Mkt": opt.market_price, 
-            "Ana": round(p_ana, 2), "Err_A": round(p_ana - opt.market_price, 2),
+            "T": opt.maturity, 
+            "K": opt.strike, 
+            "Mkt": opt.market_price, 
+            "Ana": round(p_ana, 2), 
+            "Err_A": round(p_ana - opt.market_price, 2),
             "IV_Mkt": iv_mkt,
+            "r_used": round(r_T, 4) # Useful for debugging
         })
 
     df = pd.DataFrame(rows)
-    # Added 'Type' column to output for clarity
     print(df[["Type", "T", "K", "Mkt", "Ana", "Err_A"]].to_string(index=False))
-    df.to_csv(f"{base_name}_prices.csv", index=False) 
+    df.to_csv(f"{base_name}_prices.csv", index=False)
 
 def plot_surface(S0, r, q, params, ticker, filename, market_options=None):
     """
@@ -204,7 +205,7 @@ def main():
     clear_numba_cache()
     os.makedirs("results", exist_ok=True)
     
-    ticker = "NVDA" #"^SPX" 
+    ticker = "MSFT" #"^SPX" #"^SPX" 
     
     options, S0 = fetch_options(ticker)
     if not options:
@@ -215,9 +216,19 @@ def main():
     log(f"Target: {ticker} (S0={S0:.2f}) | N={len(options)}")
     
     avg_mkt_price = np.mean([o.market_price for o in options]) if options else 1.0
-    r, q = 0.043, 0.0002
+    q = 0.0078 #0.0113 #0.0002 #0.0426, 
+    tenors = [0.08, 0.25, 0.5, 1.0, 2.0, 3.0]
+    rates = [
+        0.0376,  # 1-Month (Inverted high)
+        0.0368,  # 3-Month
+        0.0363,  # 6-Month
+        0.0352,  # 1-Year  (The "Belly" Low - Critical for T=1.0 calibration)
+        0.0356,  # 2-Year  (Starting to steepen)
+        0.0366,  # 3-Year
+    ]
 
-    cal_ana = HestonCalibrator(S0, r, q)
+    my_curve = SimpleYieldCurve(tenors, rates)
+    cal_ana = HestonCalibrator(S0, r_curve=my_curve, q=q)
     #cal_mc = HestonCalibratorMC(S0, r, q, n_paths=75_000, n_steps=252)
     init_guess = [2.0, 0.025, 0.5, -0.7, 0.015]
 
@@ -245,7 +256,7 @@ def main():
     }, index=params)
     print(df_params.to_string(float_format="{:.4f}".format))
     
-    save_results(ticker, S0, r, q, res_ana,  options)
+    save_results(ticker, S0, my_curve, q, res_ana,  options)
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
