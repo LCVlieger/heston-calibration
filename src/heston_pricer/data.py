@@ -65,16 +65,16 @@ def fetch_options(ticker_symbol: str, target_size: int = 100) -> Tuple[List[Mark
             combined = pd.concat([candidates_puts, candidates_calls])
             
             # Quality Mask
-            mask = (combined['bid'] > 0.05) & (combined['openInterest'] > 0)
-            valid = combined[mask].copy()
-            
+            #mask = True # (combined['bid'] > 0.05) & (combined['openInterest'] > 0)
+            #valid = combined[mask].copy()
+            valid = combined
             for _, row in valid.iterrows():
                 mid = (row['bid'] + row['ask']) / 2.0
                 spread = row['ask'] - row['bid']
                 
                 # Moneyness Filter (0.6 to 1.5 covers the relevant smile)
                 moneyness = row['strike'] / S0
-                if not (0.6 <= moneyness <= 1.5): continue
+                if not (0.75 <= moneyness <= 1.25): continue #0.75, 1.5
 
                 all_candidates.append({
                     'strike': row['strike'],

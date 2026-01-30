@@ -12,12 +12,9 @@ from scipy.ndimage import gaussian_filter
 
 # Local package imports
 try:
-    from heston_pricer.calibration import HestonCalibrator, HestonCalibratorMC, implied_volatility
+    from heston_pricer.calibration import HestonCalibrator, implied_volatility
     from heston_pricer.analytics import HestonAnalyticalPricer
     from heston_pricer.data import fetch_options
-    from heston_pricer.models.mc_pricer import MonteCarloPricer
-    from heston_pricer.models.process import HestonProcess
-    from heston_pricer.market import MarketEnvironment
     from heston_pricer.instruments import EuropeanOption, OptionType
 except ImportError:
     raise ImportError("heston_pricer package not found. Ensure PYTHONPATH is set correctly.")
@@ -207,7 +204,7 @@ def main():
     clear_numba_cache()
     os.makedirs("results", exist_ok=True)
     
-    ticker = "^SPX" 
+    ticker = "NVDA" #"^SPX" 
     
     options, S0 = fetch_options(ticker)
     if not options:
@@ -218,11 +215,11 @@ def main():
     log(f"Target: {ticker} (S0={S0:.2f}) | N={len(options)}")
     
     avg_mkt_price = np.mean([o.market_price for o in options]) if options else 1.0
-    r, q = 0.045, 0.011
+    r, q = 0.043, 0.0002
 
     cal_ana = HestonCalibrator(S0, r, q)
     #cal_mc = HestonCalibratorMC(S0, r, q, n_paths=75_000, n_steps=252)
-    init_guess = [2.0, 0.025, 1.1, -0.7, 0.015]
+    init_guess = [2.0, 0.025, 0.5, -0.7, 0.015]
 
     # --- 1. Analytical Calibration ---
     t0 = time.time()    

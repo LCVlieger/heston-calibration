@@ -72,7 +72,7 @@ def refine_calibration(S0, r, q, initial_params, market_options):
     clean_options = []
     dropped = 0
     
-    THRESHOLD = 1.0 
+    THRESHOLD = np.inf
     
     for opt in market_options:
         try:

@@ -27,31 +27,43 @@ class HestonCalibrator:
         bounds =  [(0.1, 10.0), (0.001, 2.0), (0.01, 5.0), (-0.999, 0.0), (0.001, 2.0)]
 
         def objective(params):
+            # Pack parameters: use internal log-transform for stability
             kappa, theta, xi, rho, v0 = params
-            # Soft constraint for Feller condition
+            
             penalty = 0.0
-            if 2 * kappa * theta < xi**2: 
-                penalty = 0e0 * (abs(2 * kappa * theta - xi**2)**2)
+            # Penalty for Feller violation: 2*k*th > xi^2
+            feller_gap = 2 * kappa * theta - xi**2
+            if feller_gap < 1e-5:
+                penalty += 0 * (1e-5 - feller_gap)**2
 
-            sse = 0.0
+            total_error = 0.0
+            
             for opt in options:
-                # Dispatch based on option type
+                # 1. Price Model
                 if opt.option_type == "PUT":
-                    model_price = HestonAnalyticalPricer.price_european_put(
-                        self.S0, opt.strike, opt.maturity, self.r, self.q,
-                        kappa, theta, xi, rho, v0
+                    model_p = HestonAnalyticalPricer.price_european_put(
+                        self.S0, opt.strike, opt.maturity, self.r, self.q, kappa, theta, xi, rho, v0
                     )
                 else:
-                    model_price = HestonAnalyticalPricer.price_european_call(
-                        self.S0, opt.strike, opt.maturity, self.r, self.q,
-                        kappa, theta, xi, rho, v0
+                    model_p = HestonAnalyticalPricer.price_european_call(
+                        self.S0, opt.strike, opt.maturity, self.r, self.q, kappa, theta, xi, rho, v0
                     )
                 
-                # Inverse Price Weighting
-                weight = 1.0 / (opt.market_price + 1e-5)
-                sse += ((model_price - opt.market_price) * weight) ** 2
-            
-            return sse + penalty
+                # 2. Adaptive Weighting (The Fix)
+                # We calculate the 'Moneyness distance'
+                moneyness = np.log(opt.strike / self.S0)
+                
+                # Increase weight for OTM options (the wings) which define rho and xi
+                # Standard ATM weight = 1.0; OTM weights scale up
+                wing_weight = 1.0 + 5.0 * (moneyness**2)
+                
+                # Relative Price Error is more stable than IV-conversion in-loop
+                # This prevents the solver from getting stuck in IV-solver noise
+                relative_error = (model_p - opt.market_price) / opt.market_price
+                
+                total_error += wing_weight * (relative_error**2)
+
+            return total_error + penalty
 
         def callback(xk):
             print(f"   [Analytical] k={xk[0]:.2f}, theta={xk[1]:.3f}, xi={xk[2]:.2f}, rho={xk[3]:.2f}, v0={xk[4]:.3f}", flush=True)
