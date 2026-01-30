@@ -3,12 +3,25 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from typing import List, Tuple
-from .calibration import MarketOption 
+from dataclasses import dataclass
+
+@dataclass
+class MarketOption:
+    strike: float
+    maturity: float
+    market_price: float
+    option_type: str = "CALL"  # Now stores "CALL" or "PUT"
 
 def fetch_options(ticker_symbol: str, target_size: int = 100) -> Tuple[List[MarketOption], float]:
+    """
+    PRO FETCHER:
+    - Fetches OTM Puts (Left Wing) and OTM Calls (Right Wing).
+    - Stratifies across all available maturities (Time).
+    - Zero Intrinsic Value in the dataset.
+    """
     ticker = yf.Ticker(ticker_symbol)
     
-    # 1. Fetch Spot
+    # 1. Get Spot Price
     try:
         S0 = ticker.fast_info.get('last_price', None)
         if S0 is None:
@@ -17,127 +30,103 @@ def fetch_options(ticker_symbol: str, target_size: int = 100) -> Tuple[List[Mark
     except:
         return [], 0.0
 
-    print(f"--- Fetching Surface for {ticker_symbol} (Spot: {S0:.2f}) ---")
+    print(f"--- Pro Calibration Set: {ticker_symbol} (Spot: {S0:.2f}) ---")
     
     expirations = ticker.options
     if not expirations: return [], 0.0
-
     today = datetime.now()
     
-    # 2. MAXIMIZED MATURITY SELECTION (T <= 3.0)
-    MIN_T_YEARS = 165 / 365.25
-    MAX_T_YEARS = 2.7
+    all_candidates = []
+    # Use Domain Restriction immediately (T > 0.46) to fix Xi instability
+    MIN_T, MAX_T = 0.46, 2.5 
     
-    valid_dates = []
-
+    print("Scanning option chains (Puts & Calls)...")
     for exp_str in expirations:
         try:
             d = datetime.strptime(exp_str, "%Y-%m-%d")
             T = (d - today).days / 365.25
+            if not (MIN_T <= T <= MAX_T): continue
+
+            # Fetch BOTH chains
+            chain = ticker.option_chain(exp_str)
+            calls = chain.calls
+            puts = chain.puts
             
-            if MIN_T_YEARS <= T <= MAX_T_YEARS:
-                valid_dates.append(exp_str)
+            # --- SELECTION LOGIC ---
+            # 1. OTM Puts (Strikes < Spot) -> Capture Downside Skew
+            candidates_puts = puts[puts['strike'] < S0].copy()
+            candidates_puts['type'] = 'PUT'
+            
+            # 2. OTM Calls (Strikes >= Spot) -> Capture Upside/Smile
+            candidates_calls = calls[calls['strike'] >= S0].copy()
+            candidates_calls['type'] = 'CALL'
+            
+            # Combine and Filter
+            combined = pd.concat([candidates_puts, candidates_calls])
+            
+            # Quality Mask
+            mask = (combined['bid'] > 0.05) & (combined['openInterest'] > 0)
+            valid = combined[mask].copy()
+            
+            for _, row in valid.iterrows():
+                mid = (row['bid'] + row['ask']) / 2.0
+                spread = row['ask'] - row['bid']
+                
+                # Moneyness Filter (0.6 to 1.5 covers the relevant smile)
+                moneyness = row['strike'] / S0
+                if not (0.6 <= moneyness <= 1.5): continue
+
+                all_candidates.append({
+                    'strike': row['strike'],
+                    'maturity': T,
+                    'market_price': mid,
+                    'spread': spread,
+                    'moneyness': moneyness,
+                    'type': row['type']
+                })
         except: continue
 
-    # To get ~100 options, we need as many dates as possible. 
-    # Only downsample if we have an excessive amount (e.g. > 24 dates).
-    if len(valid_dates) > 24:
-        indices = np.linspace(0, len(valid_dates)-1, 24, dtype=int)
-        selected_dates = [valid_dates[i] for i in indices]
-    else:
-        selected_dates = valid_dates
+    if not all_candidates: return [], S0
+    df = pd.DataFrame(all_candidates)
 
-    # Sort dates to ensure chronological processing
-    selected_dates = sorted(list(set(selected_dates)))
-    print(f"Scanning {len(selected_dates)} maturities (Max T: {MAX_T_YEARS})...")
+    # 3. STRATIFIED SELECTION
+    unique_maturities = sorted(df['maturity'].unique())
+    n_maturities = len(unique_maturities)
+    if n_maturities == 0: return [], S0
 
-    # 3. HIGH DENSITY MONEYNESS SEARCH
-    # Create a dense grid from 60% to 150% moneyness to ensure high capture rate
-    target_moneyness = np.arange(0.6, 1.55, 0.05) 
+    target_per_date = max(8, target_size // n_maturities)
     
-    market_options = []
-
-    for exp_str in selected_dates:
-        try:
-            exp_date = datetime.strptime(exp_str, "%Y-%m-%d")
-            T = (exp_date - today).days / 365.25
-            
-            raw_chain = ticker.option_chain(exp_str).calls
-            if raw_chain.empty: continue
-
-            # --- LOGIC BRANCHING ---
-            
-            # Strict Logic: OI > 50 ensures liquidity
-            mask_strict = (raw_chain['openInterest'] > 50) & (raw_chain['bid'] > 0.05)
-            if T > 1.5:
-                # Relax OI for LEAPS slightly as volume is naturally lower
-                mask_strict = (raw_chain['openInterest'] > 10) & (raw_chain['bid'] > 0.05)
-            
-            chain = raw_chain[mask_strict].copy()
-            use_fallback = False
-
-            # Fallback Logic
-            if chain.empty:
-                mask_relaxed = (raw_chain['lastPrice'] > 0) | (raw_chain['bid'] > 0)
-                chain = raw_chain[mask_relaxed].copy()
-                use_fallback = True 
-            
-            if chain.empty: continue
-
-            for m in target_moneyness:
-                target_k = S0 * m
-                
-                chain['dist'] = (chain['strike'] - target_k).abs()
-                candidates = chain.nsmallest(1, 'dist')
-                
-                if candidates.empty: continue
-                
-                row = candidates.iloc[0]
-                
-                # Proximity Check: Strict 7.5%, Fallback 15%
-                limit_dist = S0 * 0.15 if use_fallback else S0 * 0.075
-                if row['dist'] > limit_dist: continue
-
-                # Pricing Logic
-                bid, ask, last = row.get('bid', 0), row.get('ask', 0), row['lastPrice']
-                
-                mid = (bid + ask) / 2.0
-                spread = ask - bid
-                
-                if not use_fallback:
-                    if mid > 0 and (spread / mid) > 0.4: continue
-
-                price = mid if (bid > 0 and ask > 0) else last
-                
-                # Arbitrage Check
-                intrinsic = max(S0 - row['strike'], 0)
-                
-                if price <= intrinsic:
-                    if not use_fallback:
-                        continue 
-                    else:
-                        price = intrinsic + 0.05 
-
-                # Deduplication
-                is_dupe = any(o.strike == row['strike'] and o.maturity == T for o in market_options)
-                if not is_dupe:
-                    market_options.append(MarketOption(
-                        strike=float(row['strike']),
-                        maturity=float(T),
-                        market_price=float(price),
-                        option_type="CALL"
-                    ))
-        except: continue
-
-    # 4. Final Downsampling
-    market_options.sort(key=lambda x: (x.maturity, x.strike))
+    final_selection = []
+    print(f"Stratifying across {n_maturities} maturities...")
     
-    # If we exceeded the target, step nicely to reduce density uniformly
-    if len(market_options) > target_size:
-        step = len(market_options) / target_size
-        indices = [int(i * step) for i in range(target_size)]
-        market_options = [market_options[i] for i in indices]
-
-    print(f"Selected {len(market_options)} instruments. Range: T=[{market_options[0].maturity:.2f}, {market_options[-1].maturity:.2f}].")
+    for mat in unique_maturities:
+        mat_slice = df[df['maturity'] == mat]
         
+        # Split by Type instead of arbitrary moneyness
+        # This ensures we get both Left Wing (Puts) and Right Wing (Calls)
+        puts_slice = mat_slice[mat_slice['type'] == 'PUT'].sort_values('spread')
+        calls_slice = mat_slice[mat_slice['type'] == 'CALL'].sort_values('spread')
+        
+        n_side = target_per_date // 2
+        
+        best_puts = puts_slice.head(n_side)
+        best_calls = calls_slice.head(n_side + 2) # Slightly more calls usually available
+        
+        final_selection.extend(best_puts.to_dict('records'))
+        final_selection.extend(best_calls.to_dict('records'))
+
+    # 4. FINAL POLISH
+    final_df = pd.DataFrame(final_selection)
+    
+    # Random sample if over target (preserves distribution better than spread sort)
+    if len(final_df) > target_size:
+        final_df = final_df.sample(n=target_size, random_state=42)
+    
+    market_options = [
+        MarketOption(r['strike'], r['maturity'], r['market_price'], r['type'])
+        for _, r in final_df.iterrows()
+    ]
+    
+    market_options.sort(key=lambda x: (x.maturity, x.strike))
+    print(f"Selected {len(market_options)} OTM options (Puts & Calls).")
     return market_options, S0

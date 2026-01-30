@@ -75,7 +75,7 @@ class HestonCalibrator:
         
         return {
             "kappa": kappa, "theta": theta, "xi": xi, "rho": rho, "v0": v0,
-            "success": result.success, "sse": result.fun, 
+            "success": result.success, "fun": result.fun, 
             "rmse_iv": np.sqrt(sse_iv / count) if count > 0 else 0.0
         }
 
@@ -167,7 +167,7 @@ class HestonCalibratorMC:
             "kappa": result.x[0], "theta": result.x[1], "xi": result.x[2],
             "rho": result.x[3], "v0": result.x[4], 
             "success": result.success, 
-            "fun": result.fun, # SSE
+            "fun": result.fun, 
             "rmse_iv": np.sqrt(sse_iv / count) if count > 0 else 0.0
         }
     

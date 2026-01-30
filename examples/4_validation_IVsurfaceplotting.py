@@ -22,9 +22,8 @@ except ImportError:
 4_visualize_surface.py (Portfolio Final)
 ----------------------
 1. Loads existing calibration.
-2. Filters ONLY extreme outliers (>3.5% IV Error).
-3. Re-calibrates on clean data.
-4. Generates the final, honest, publication-grade plot.
+2. Compares Analytical vs Monte Carlo performance.
+3. Generates the final, honest, publication-grade plot.
 """
 
 class ReconstructedOption:
@@ -70,18 +69,15 @@ def refine_calibration(S0, r, q, initial_params, market_options):
     clean_options = []
     dropped = 0
     
-    # 3.5% Tolerance: Removes GARBAGE, keeps BIAS.
-    # This is the "Honest" threshold.
-    THRESHOLD = 0.035 
+    # Threshold kept at 1.0 (effectively no filtering) for initial run if desired,
+    # but logically used here to maintain user's refinement flow.
+    THRESHOLD = 1.0 
     
     for opt in market_options:
         try:
-            # 1. Price with LOADED parameters
             p_mod = HestonAnalyticalPricer.price_european_call(
                 S0, opt.strike, opt.maturity, r, q, kappa, theta, xi, rho, v0
             )
-            
-            # 2. Compare IVs
             iv_mod = implied_volatility(p_mod, S0, opt.strike, opt.maturity, r, q)
             iv_mkt = implied_volatility(opt.market_price, S0, opt.strike, opt.maturity, r, q)
             
@@ -89,7 +85,6 @@ def refine_calibration(S0, r, q, initial_params, market_options):
                 dropped += 1
                 continue
             
-            # 3. Filter
             err = abs(iv_mkt - iv_mod)
             if err <= THRESHOLD:
                 clean_options.append(opt)
@@ -100,16 +95,14 @@ def refine_calibration(S0, r, q, initial_params, market_options):
             
     print(f"-> Dropped {dropped} extreme outliers. Re-calibrating on {len(clean_options)} instruments...")
     
-    # 4. Re-Calibrate
     cal = HestonCalibrator(S0, r, q)
     t0 = time.time()
-    # Use the loaded params as the hot-start guess
     res_final = cal.calibrate(clean_options, init_guess=p_init_vals)
     print(f"-> Optimization Complete ({time.time()-t0:.2f}s)")
     
-    return res_final, clean_options
+    return res_final, clean_options, dropped
 
-def plot_surface_professional(S0, r, q, params, ticker, filename, market_options=None):
+def plot_surface_professional(S0, r, q, params, ticker, filename, market_options, data_full, dropped_count):
     kappa, theta, xi, rho, v0 = params['kappa'], params['theta'], params['xi'], params['rho'], params['v0']
 
     # --- 1. CONFIGURATION ---
@@ -136,18 +129,16 @@ def plot_surface_professional(S0, r, q, params, ticker, filename, market_options
             except:
                 Z[i, j] = np.nan
 
-    # --- 3. SMOOTHING ---
     mask = np.isnan(Z)
     if np.any(mask):
         Z = pd.DataFrame(Z).interpolate(method='linear', axis=1).ffill(axis=1).bfill(axis=1).values
     Z_smooth = gaussian_filter(Z, sigma=0.8)
 
-    # --- 4. PLOTTING ---
+    # --- 3. PLOTTING ---
     with plt.style.context('dark_background'):
         fig = plt.figure(figsize=(14, 10))
         ax = fig.add_subplot(111, projection='3d')
 
-        # Surface
         surf = ax.plot_surface(X, Y, Z_smooth, cmap=cm.RdYlBu_r, 
                                rcount=100, ccount=100,  
                                edgecolor='black',       
@@ -157,7 +148,6 @@ def plot_surface_professional(S0, r, q, params, ticker, filename, market_options
                                antialiased=True,        
                                zorder=1)
 
-        # Market Needles (Filtered Data)
         if market_options:
             plot_opts = [
                 o for o in market_options 
@@ -177,31 +167,28 @@ def plot_surface_professional(S0, r, q, params, ticker, filename, market_options
                 iv_mod = Z_smooth[t_idx, m_idx]
 
                 if np.isnan(iv_mod): continue
-
-                # Match Visual Filter to Calibration Filter (3.5%)
-                diff = abs(iv_mkt - iv_mod)
-                if diff > 0.035: continue 
                 
                 valid_needles += 1
                 is_above = iv_mkt >= iv_mod
                 dot_zorder = 10 if is_above else 1
 
-                # Needle
                 ax.plot([m_mkt, m_mkt], [t_mkt, t_mkt], [iv_mod, iv_mkt], 
                         color='white', linestyle='-', linewidth=0.5, alpha=0.4, zorder=dot_zorder)
                 
-                # Dot
                 lbl = 'Market Price-IV' if valid_needles == 1 else ""
                 ax.plot([m_mkt, m_mkt], [t_mkt, t_mkt], [iv_mkt], 
                         marker='o', linestyle='None',
                         color="#F0F0F0", markersize=4.0, alpha=0.9, 
                         zorder=dot_zorder, label=lbl)
 
-        # --- 5. AESTHETICS ---
+        # --- 4. AESTHETICS ---
         ax.dist = 11
         ax.set_xlim(LOWER_M, UPPER_M)
         ax.set_ylim(UPPER_T, LOWER_T) 
-        
+        z_span = 0.25
+        z_center = 0.4575
+        #ax.set_zlim(z_center - z_span/2, z_center + z_span/2)
+
         ax.xaxis.set_pane_color((1, 1, 1, 0))
         ax.yaxis.set_pane_color((1, 1, 1, 0))
         ax.zaxis.set_pane_color((1, 1, 1, 0))
@@ -218,6 +205,18 @@ def plot_surface_professional(S0, r, q, params, ticker, filename, market_options
         subtitle = rf"$\kappa={kappa:.2f}, \theta={theta:.2f}, \xi={xi:.2f}, \rho={rho:.2f}, v_0={v0:.3f}$"
         fig.text(0.535, 0.81, subtitle, color='#AAAAAA', fontsize=10, family='monospace', ha='center')
 
+        # --- 5. PERFORMANCE METRICS OVERLAY ---
+        mc_res = data_full.get('monte_carlo_results', {})
+        comparison_text = (
+            f"Performance Metrics\n"
+            f"-------------------\n"
+            f"MC RMSE (Global):  {mc_res.get('rmse_iv', 0):.5f}\n"
+            f"Analytical RMSE:    {params.get('rmse_iv', 0):.5f}\n"
+            f"Feller Condition:   {'Met' if (2*kappa*theta > xi**2) else 'Violated'}\n"
+            f"Outliers Removed:   {dropped_count}"
+        )
+        print(comparison_text)
+
         ax.set_xlabel('Moneyness ($K/S_0$)', color='white', labelpad=10)
         ax.set_ylabel('Maturity ($T$ Years)', color='white', labelpad=10)
         ax.set_zlabel(r'Implied Volatility (%)', color='white', labelpad=10)
@@ -230,34 +229,23 @@ def plot_surface_professional(S0, r, q, params, ticker, filename, market_options
         cbar.outline.set_visible(False)
 
         save_path = f"{filename}_surface_refined.png"
-        plt.savefig(save_path, dpi=1000, facecolor='black', bbox_inches='tight')
+        plt.savefig(save_path, dpi=600, facecolor='black', bbox_inches='tight')
         print(f"-> Saved: {save_path}")
         plt.close()
 
 def main():
     try:
-        # 1. Load Initial Data & Params
         data, market_options, base_name = load_latest_calibration()
+        S0, r, q = data['market']['S0'], data['market']['r'], data['market']['q']
         
-        S0 = data['market']['S0']
-        r = data['market']['r']
-        q = data['market']['q']
-        # Try to get MC results, fall back to Analytical if missing
+        # Use MC params to demonstrate analytical fit discrepancy
         initial_params = data.get('monte_carlo_results', data.get('analytical'))
-        
         ticker = base_name.split("calibration_")[1].split("_")[0] if "calibration_" in base_name else "Asset"
         
-        # 2. Refine Calibration (Remove Outliers > 3.5% & Optimize)
-        new_params, clean_options = refine_calibration(S0, r, q, initial_params, market_options)
+        # Re-calibrate analytically (keeping outliers to show model bias)
+        new_params, clean_options, dropped = refine_calibration(S0, r, q, initial_params, market_options)
         
-        # 3. Visualize Result
-        plot_surface_professional(
-            S0, r, q, 
-            new_params,  # Use the NEW refined parameters
-            ticker, 
-            base_name, 
-            clean_options # Plot only the clean data
-        )
+        plot_surface_professional(S0, r, q, new_params, ticker, base_name, clean_options, data, dropped)
         
     except Exception as e:
         print(f"[Error] {e}")
