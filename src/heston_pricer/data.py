@@ -11,17 +11,18 @@ class MarketOption:
     maturity: float
     market_price: float
     option_type: str = "CALL" 
+    bid: float = 0.0
+    ask: float = 0.0
 
 def fetch_options(ticker_symbol: str, target_size: int = 100) -> Tuple[List[MarketOption], float]:
     """
-    PRO FETCHER:
-    - Uses ASK price to avoid zero-bid crashes during after-hours/illiquid periods.
-    - Stratifies across T > 0.46.
-    - Filters out 'ghost' options with 0.00 price.
+    SMART FETCHER (DISTRIBUTION SAMPLING):
+    - Filters: Ghost Bids (2.65bps), Wide Spreads (>40%), Moneyness (0.75-1.25).
+    - Selection: NON-UNIFORM. heavily weights ATM options (High Liquidity) 
+      while sparsely sampling OTM wings (Smile Definition).
     """
     ticker = yf.Ticker(ticker_symbol)
     
-    # 1. Get Spot Price
     try:
         S0 = ticker.fast_info.get('last_price', None)
         if S0 is None:
@@ -30,109 +31,128 @@ def fetch_options(ticker_symbol: str, target_size: int = 100) -> Tuple[List[Mark
     except:
         return [], 0.0
 
-    print(f"--- Pro Calibration Set: {ticker_symbol} (Spot: {S0:.2f}) ---")
+    print(f"--- Smart Calibration Set: {ticker_symbol} (Spot: {S0:.2f}) ---")
     
     expirations = ticker.options
     if not expirations: return [], 0.0
     today = datetime.now()
     
     all_candidates = []
-    # Domain Restriction (T > 0.46) to fix NVDA Xi instability
     MIN_T, MAX_T = 0.46, 2.5 
     
-    print("Scanning option chains (Puts & Calls)...")
+    # Using the optimized 2.65bps (0.000265) we calculated for SPX/NVDA scaling
+    PHI = 0.000265
+
+    print("Scanning option chains (filtering junk data)...")
     for exp_str in expirations:
         try:
             d = datetime.strptime(exp_str, "%Y-%m-%d")
             T = (d - today).days / 365.25
             if not (MIN_T <= T <= MAX_T): continue
 
-            # Fetch BOTH chains
             chain = ticker.option_chain(exp_str)
-            calls = chain.calls
+            
             puts = chain.puts
+            puts['type'] = 'PUT'
+            calls = chain.calls
+            calls['type'] = 'CALL'
+            combined = pd.concat([puts, calls])
             
-            # Filter for OTM Puts (K < S0)
-            candidates_puts = puts[puts['strike'] < S0].copy()
-            candidates_puts['type'] = 'PUT'
-            
-            # Filter for OTM Calls (K >= S0)
-            candidates_calls = calls[calls['strike'] >= S0].copy()
-            candidates_calls['type'] = 'CALL'
-            
-            combined = pd.concat([candidates_puts, candidates_calls])
-            
-            # --- VALIDATION LOOP ---
             for _, row in combined.iterrows():
-                # FIX: Use ASK price instead of Mid or Bid
-                # When markets are closed, Bid often drops to 0.00, but Ask remains.
-                market_p = row['ask']
+                K = row['strike']
+                moneyness = K / S0
                 
-                # FALLBACK: If Ask is also 0 (data error), try lastPrice, else skip
-                if market_p <= 0.01: 
-                    market_p = row.get('lastPrice', 0.0)
-                
-                # FINAL SAFETY: If it's still < 0.01, it will crash the optimizer. Skip it.
-                if market_p < 0.01: continue
-
-                # Safe spread calc (handle missing bid)
-                bid_val = row.get('bid', 0.0)
-                spread = market_p - bid_val
-                
-                # Moneyness Filter (0.75 to 1.25 covers the relevant smile)
-                moneyness = row['strike'] / S0
+                # Standard Moneyness & OTM Filter
                 if not (0.75 <= moneyness <= 1.25): continue 
+                if row['type'] == 'PUT' and K >= S0: continue
+                if row['type'] == 'CALL' and K < S0: continue
+                
+                bid = row.get('bid', 0.0)
+                ask = row.get('ask', 0.0)
+                
+                # 1. Anti-Ghost Check
+                dynamic_min_bid = S0 * PHI
+                if bid < dynamic_min_bid: continue 
+
+                # 2. Spread Check
+                mid = (bid + ask) / 2.0
+                spread_ratio = (ask - bid) / mid
+                if spread_ratio > 0.40: continue 
 
                 all_candidates.append({
-                    'strike': row['strike'],
-                    'maturity': T,
-                    'market_price': market_p, # Now using ASK
-                    'spread': spread,
-                    'moneyness': moneyness,
-                    'type': row['type']
+                    'strike': K, 'maturity': T, 'market_price': mid,
+                    'spread_ratio': spread_ratio, 'type': row['type'],
+                    'bid': bid, 'ask': ask
                 })
-        except Exception as e:
-            continue
+        except: continue
 
     if not all_candidates: return [], S0
+        
     df = pd.DataFrame(all_candidates)
-
-    # 3. STRATIFIED SELECTION
-    unique_maturities = sorted(df['maturity'].unique())
-    n_maturities = len(unique_maturities)
-    if n_maturities == 0: return [], S0
-
-    target_per_date = max(8, target_size // n_maturities)
     
-    final_selection = []
-    print(f"Stratifying across {n_maturities} maturities...")
+    # ---------------------------------------------------------
+    # SELECTION STRATEGY: SKEWED DISTRIBUTION (ATM FOCUSED)
+    # ---------------------------------------------------------
+    
+    unique_maturities = sorted(df['maturity'].unique())
+    target_per_date = max(4, target_size // len(unique_maturities))
+    selected_indices = set()
+    
+    # Skew Factor: 2.0 = Quadratic (Standard), 3.0 = Cubic (Very ATM heavy)
+    SKEW_POWER = 2.0 
+    
+    print(f"Stratifying {len(unique_maturities)} maturities with Quadratic ATM Skew...")
     
     for mat in unique_maturities:
         mat_slice = df[df['maturity'] == mat]
         
-        # Sort by liquidity (spread) to get the "cleanest" prices
-        puts_slice = mat_slice[mat_slice['type'] == 'PUT'].sort_values('spread')
-        calls_slice = mat_slice[mat_slice['type'] == 'CALL'].sort_values('spread')
-        
-        n_side = target_per_date // 2
-        
-        best_puts = puts_slice.head(n_side)
-        best_calls = calls_slice.head(n_side + 2) # Slight bias for calls if odd number
-        
-        final_selection.extend(best_puts.to_dict('records'))
-        final_selection.extend(best_calls.to_dict('records'))
+        for opt_type in ['PUT', 'CALL']:
+            # Sort by strike (Low -> High)
+            # Puts: Low Strike (Deep OTM) -> High Strike (ATM)
+            # Calls: Low Strike (ATM) -> High Strike (Deep OTM)
+            candidates = mat_slice[mat_slice['type'] == opt_type].sort_values('strike')
+            
+            count = len(candidates)
+            if count == 0: continue
 
-    final_df = pd.DataFrame(final_selection)
+            # How many do we need?
+            n_need = target_per_date // 2
+            if opt_type == 'CALL': n_need += 1
+
+            if count <= n_need:
+                selected_indices.update(candidates.index)
+            else:
+                # 1. Create Linear Space 0 -> 1
+                u = np.linspace(0, 1, n_need)
+                
+                # 2. Apply Quadratic Skew based on Option Type
+                if opt_type == 'CALL':
+                    # Calls start at ATM (Index 0). We want more points near 0.
+                    # Mapping: 0->0, 0.5->0.25, 1->1
+                    skewed_u = u ** SKEW_POWER
+                else:
+                    # Puts end at ATM (Index N). We want more points near 1.
+                    # Mapping: 0->0, 0.5->0.75, 1->1
+                    skewed_u = 1 - (1 - u) ** SKEW_POWER
+                
+                # 3. Convert back to integer indices
+                idx_positions = (skewed_u * (count - 1)).astype(int)
+                
+                # Ensure uniqueness (rare edge case with small counts)
+                idx_positions = np.unique(idx_positions)
+                
+                selected_indices.update(candidates.iloc[idx_positions].index)
+
+    final_df = df.loc[list(selected_indices)].copy()
     
-    # Final random sample if we still have too many
+    # Cap excess (Prioritize tightest spreads if we overshoot target)
     if len(final_df) > target_size:
-        final_df = final_df.sample(n=target_size, random_state=42)
+        final_df = final_df.sort_values('spread_ratio').head(target_size)
     
     market_options = [
-        MarketOption(r['strike'], r['maturity'], r['market_price'], r['type'])
+        MarketOption(r['strike'], r['maturity'], r['market_price'], r['type'], r['bid'], r['ask'])
         for _, r in final_df.iterrows()
     ]
-    
     market_options.sort(key=lambda x: (x.maturity, x.strike))
-    print(f"Selected {len(market_options)} OTM options (Puts & Calls).")
+    
     return market_options, S0

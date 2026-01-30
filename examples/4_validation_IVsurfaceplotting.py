@@ -22,8 +22,9 @@ except ImportError:
 4_visualize_surface.py (Portfolio Final)
 ----------------------
 1. Loads existing calibration.
-2. Compares Analytical vs Monte Carlo performance.
-3. Generates the final, honest, publication-grade plot.
+2. Compares Analytical vs Monte Carlo performance (selects Best).
+3. Refines calibration using the Best parameters.
+4. Generates the final, honest, publication-grade plot.
 """
 
 class ReconstructedOption:
@@ -34,6 +35,7 @@ class ReconstructedOption:
         self.option_type = str(option_type)
 
 def load_latest_calibration():
+    # Look for meta files
     patterns = ['results/calibration_*_meta.json', 'calibration_*_meta.json']
     files = []
     for p in patterns: files.extend(glob.glob(p))
@@ -51,8 +53,10 @@ def load_latest_calibration():
     if isinstance(curve_data, dict):
         r_curve = SimpleYieldCurve(curve_data['tenors'], curve_data['rates'])
     else:
+        # Fallback for old scalar format
         r_curve = SimpleYieldCurve([0.0, 30.0], [float(curve_data), float(curve_data)])
 
+    # --- Load Market Prices ---
     csv_file = f"{base_name}_prices.csv"
     market_options = []
     if os.path.exists(csv_file):
@@ -63,23 +67,53 @@ def load_latest_calibration():
 
     return data, r_curve, market_options, base_name
 
-def refine_calibration(S0, r_curve, q, initial_params, market_options):
+def select_best_parameters(data):
     """
-    Filters outliers based on initial parameters and re-runs calibration.
+    Compares Analytical and Monte Carlo results (if available)
+    and returns the set with the lowest objective function value ('fun').
     """
-    kappa = initial_params['kappa'] 
-    theta = initial_params['theta']
-    xi = initial_params['xi']
-    rho = initial_params['rho']
-    v0 = initial_params['v0']
+    res_ana = data.get('analytical', {})
+    # Check both potential key names for MC
+    res_mc = data.get('monte_carlo', data.get('monte_carlo_results', {}))
+
+    # Helper to safely get error metric (lower 'fun' is better)
+    def get_score(res):
+        if not res or 'fun' not in res: return float('inf')
+        return res['fun']
+
+    score_ana = get_score(res_ana)
+    score_mc = get_score(res_mc)
+
+    if score_mc < score_ana:
+        print(f"\n[Selection] Monte Carlo Win (Err: {score_mc:.4f} < Ana: {score_ana:.4f})")
+        return res_mc, "Monte Carlo"
+    elif score_ana < float('inf'):
+        print(f"\n[Selection] Analytical Win (Err: {score_ana:.4f} < MC: {score_mc:.4f})")
+        return res_ana, "Analytical"
+    else:
+        print("\n[Selection] No valid results found. Using default guess.")
+        return {'kappa':2.0, 'theta':0.04, 'xi':0.5, 'rho':-0.7, 'v0':0.04}, "Default"
+
+def refine_calibration(S0, r_curve, q, best_params, market_options):
+    """
+    1. Uses 'best_params' to price options and identify outliers.
+    2. Drops outliers.
+    3. Re-calibrates (polishes) on the clean set.
+    """
+    kappa = best_params['kappa'] 
+    theta = best_params['theta']
+    xi = best_params['xi']
+    rho = best_params['rho']
+    v0 = best_params['v0']
     
+    # Use best params as the starting point for refinement
     p_init_vals = [kappa, theta, xi, rho, v0]
-    print(f"\n[Refinement] Checking {len(market_options)} options against loaded model...")
+    
+    print(f"[Refinement] Repricing {len(market_options)} options using best parameters...")
     clean_options = []
     dropped = 0
     
-    # Threshold kept high (1.0) to match the logic of file 2 while preserving file 1's structure
-    THRESHOLD = 1.0 
+    THRESHOLD = 1.0 # IV difference threshold
     
     for opt in market_options:
         try:
@@ -97,10 +131,12 @@ def refine_calibration(S0, r_curve, q, initial_params, market_options):
             iv_mod = implied_volatility(p_mod, S0, opt.strike, opt.maturity, r_T, q, opt.option_type)
             iv_mkt = implied_volatility(opt.market_price, S0, opt.strike, opt.maturity, r_T, q, opt.option_type)
             
-            if np.isnan(iv_mod) or np.isnan(iv_mkt) or iv_mod == 0.0 or iv_mkt == 0.0: 
+            # Filter invalid IVs
+            if np.isnan(iv_mod) or np.isnan(iv_mkt) or iv_mod <= 0.0 or iv_mkt <= 0.0: 
                 dropped += 1
                 continue
             
+            # Filter Outliers
             err = abs(iv_mkt - iv_mod)
             if err <= THRESHOLD:
                 clean_options.append(opt)
@@ -109,8 +145,10 @@ def refine_calibration(S0, r_curve, q, initial_params, market_options):
         except Exception:
             dropped += 1
             
-    print(f"-> Dropped {dropped} extreme outliers. Re-calibrating on {len(clean_options)} instruments...")
+    print(f"-> Dropped {dropped} outliers. Re-calibrating on {len(clean_options)} instruments...")
     
+    # We use the Analytical Calibrator for the final polish (fast & smooth)
+    # seeded with the Best Parameters (even if they came from MC).
     cal = HestonCalibrator(S0, r_curve, q)
     t0 = time.time()
     res_final = cal.calibrate(clean_options, init_guess=p_init_vals)
@@ -118,26 +156,25 @@ def refine_calibration(S0, r_curve, q, initial_params, market_options):
     
     return res_final, clean_options, dropped
 
-def plot_surface_professional(S0, r_curve, q, params, ticker, filename, market_options, data_full, dropped_count):
+def plot_surface_professional(S0, r_curve, q, params, ticker, filename, market_options, data_full, dropped_count, source_name):
     kappa, theta, xi, rho, v0 = params['kappa'], params['theta'], params['xi'], params['rho'], params['v0']
 
-    # --- 1. CONFIGURATION (Matched to File 2) ---
+    # --- 1. CONFIGURATION ---
     LOWER_M, UPPER_M = 0.5, 1.8 
     LOWER_T, UPPER_T = 0.1, 2.5
-    GRID_DENSITY = 100  # High density for smoother surface
+    GRID_DENSITY = 100 
 
     M_range = np.linspace(LOWER_M, UPPER_M, GRID_DENSITY)
     T_range = np.linspace(LOWER_T, UPPER_T, GRID_DENSITY)
     X, Y = np.meshgrid(M_range, T_range)
     Z = np.zeros_like(X)
 
-    # --- 2. CALCULATION (Using r_curve from File 1) ---
+    # --- 2. CALCULATION ---
     print(f"-> Generating Surface for: kappa={kappa:.2f}, xi={xi:.2f}, v0={v0:.3f}")
     for i in range(X.shape[0]):
         for j in range(X.shape[1]):
             T_val, M_val = Y[i, j], X[i, j]
             
-            # Fetch rate for this grid point maturity
             r_T = r_curve.get_rate(T_val)
 
             price = HestonAnalyticalPricer.price_european_call(
@@ -154,19 +191,15 @@ def plot_surface_professional(S0, r_curve, q, params, ticker, filename, market_o
         Z = pd.DataFrame(Z).interpolate(method='linear', axis=1).ffill(axis=1).bfill(axis=1).values
     Z_smooth = gaussian_filter(Z, sigma=0.8)
 
-    # --- 3. PLOTTING (Aesthetics from File 2) ---
+    # --- 3. PLOTTING ---
     with plt.style.context('dark_background'):
         fig = plt.figure(figsize=(14, 10))
         ax = fig.add_subplot(111, projection='3d')
 
         surf = ax.plot_surface(X, Y, Z_smooth, cmap=cm.RdYlBu_r, 
                                rcount=100, ccount=100,  
-                               edgecolor='black',       
-                               linewidth=0.085,         
-                               alpha=0.8,               
-                               shade=False,             
-                               antialiased=True,        
-                               zorder=1)
+                               edgecolor='black', linewidth=0.085, alpha=0.8,                       
+                               shade=False, antialiased=True, zorder=1)
 
         if market_options:
             plot_opts = [
@@ -193,7 +226,6 @@ def plot_surface_professional(S0, r_curve, q, params, ticker, filename, market_o
                 is_above = iv_mkt >= iv_mod
                 dot_zorder = 10 if is_above else 1
 
-                # File 2 specific styling: White lines, light grey dots
                 ax.plot([m_mkt, m_mkt], [t_mkt, t_mkt], [iv_mod, iv_mkt], 
                         color='white', linestyle='-', linewidth=0.8, alpha=0.65, zorder=dot_zorder)
                 
@@ -203,16 +235,16 @@ def plot_surface_professional(S0, r_curve, q, params, ticker, filename, market_o
                         color="#F0F0F0", markersize=4.0, alpha=0.9, 
                         zorder=dot_zorder, label=lbl)
 
-        # --- 4. AESTHETICS (Axis colors from File 2) ---
+        # --- 4. AESTHETICS ---
         ax.dist = 11
         ax.set_xlim(LOWER_M, UPPER_M)
         ax.set_ylim(UPPER_T, LOWER_T) 
-        #ax.set_zlim(0.315, 0.665)
+        #ax.set_zlim(0.315, 0.665) 
+
         ax.xaxis.set_pane_color((1, 1, 1, 0))
         ax.yaxis.set_pane_color((1, 1, 1, 0))
         ax.zaxis.set_pane_color((1, 1, 1, 0))
         
-        # Specific grid styling from File 2
         ax.xaxis._axinfo["grid"]['color'] = (0.5, 0.5, 0.5, 0.2)
         ax.yaxis._axinfo["grid"]['color'] = (0.5, 0.5, 0.5, 0.2)
         ax.zaxis._axinfo["grid"]['color'] = (0.5, 0.5, 0.5, 0.2)
@@ -225,19 +257,19 @@ def plot_surface_professional(S0, r_curve, q, params, ticker, filename, market_o
         subtitle = rf"$\kappa={kappa:.2f}, \theta={theta:.2f}, \xi={xi:.2f}, \rho={rho:.2f}, v_0={v0:.3f}$"
         fig.text(0.535, 0.81, subtitle, color='#AAAAAA', fontsize=10, family='monospace', ha='center')
 
-        # --- 5. PERFORMANCE METRICS OVERLAY (Verbose text from File 2) ---
-        mc_res = data_full.get('monte_carlo_results', {})
-        rmse_val = mc_res.get('rmse_iv', 0) if isinstance(mc_res, dict) else 0.0
-        
+        # --- 5. PERFORMANCE METRICS ---
         comparison_text = (
-            f"Performance Metrics\n"
+            f"Model Source: {source_name}\n"
             f"-------------------\n"
-            f"MC RMSE (Global):  {rmse_val:.5f}\n"
-            f"Analytical RMSE:    {params.get('rmse_iv', 0):.5f}\n"
+            f"Final RMSE (IV):    {params.get('rmse_iv', 0):.5f}\n"
+            f"Obj Function:       {params.get('fun', 0):.5f}\n"
             f"Feller Condition:   {'Met' if (2*kappa*theta > xi**2) else 'Violated'}\n"
             f"Outliers Removed:   {dropped_count}"
         )
-        print(comparison_text)
+        print("\n" + comparison_text)
+        
+        # Optional: Add text to plot (commented out to keep clean)
+        # fig.text(0.15, 0.75, comparison_text, color='white', fontsize=8, family='monospace')
 
         ax.set_xlabel('Moneyness ($K/S_0$)', color='white', labelpad=10)
         ax.set_ylabel('Maturity ($T$ Years)', color='white', labelpad=10)
@@ -257,18 +289,39 @@ def plot_surface_professional(S0, r_curve, q, params, ticker, filename, market_o
 
 def main():
     try:
-        # Load data (Includes r_curve construction)
+        # 1. Load Data
         data, r_curve, market_options, base_name = load_latest_calibration()
         S0, q = data['market']['S0'], data['market']['q']
         
-        initial_params = data.get('monte_carlo_results', data.get('analytical'))
+        # 2. Select BEST parameters (MC vs Analytical)
+        best_params, source_name = select_best_parameters(data)
+        
         ticker = base_name.split("calibration_")[1].split("_")[0] if "calibration_" in base_name else "Asset"
         
-        # Pass r_curve to refiner
-        new_params, clean_options, dropped = refine_calibration(S0, r_curve, q, initial_params, market_options)
+        # 3. Conditional Refinement
+        # Logic: If MC won, the parameters are likely from a global optimizer (Diff Evol).
+        # We use them as a starting point for the Analytical Calibrator (Local/Gradient) to polish the fit.
         
-        # Pass r_curve to plotter
-        plot_surface_professional(S0, r_curve, q, new_params, ticker, base_name, clean_options, data, dropped)
+        final_options = market_options
+        dropped_count = 0
+
+        #if source_name == "Monte Carlo":
+        #    print(f"\n[Refinement Triggered] Best parameters are from {source_name}.")
+        #    print("-> Passing MC parameters into Analytical Gradient Descent for final polish...")
+        #    
+        #    # Run the refinement (Reprice -> Drop Outliers -> Analytical Calibration)
+        #    best_params, final_options, dropped_count = refine_calibration(S0, r_curve, q, best_params, market_options)
+        #    
+        #    source_name = "MC + Analytical Polish"
+        #else:
+        print(f"\n[Direct Plot] Using {source_name} parameters directly (skipping refinement).")
+        
+        # 4. Plot
+        # Note: We pass 'final_options' so the plot only shows the "clean" needles if refinement happened
+        plot_surface_professional(
+            S0, r_curve, q, best_params, ticker, base_name, 
+            final_options, data, dropped_count, source_name
+        )
         
     except Exception as e:
         print(f"[Error] {e}")
