@@ -52,9 +52,11 @@ def fetch_options(ticker_symbol: str, target_size: int = 100) -> Tuple[List[Mark
             calls = chain.calls
             puts = chain.puts
             
+            # Filter for OTM Puts (K < S0)
             candidates_puts = puts[puts['strike'] < S0].copy()
             candidates_puts['type'] = 'PUT'
             
+            # Filter for OTM Calls (K >= S0)
             candidates_calls = calls[calls['strike'] >= S0].copy()
             candidates_calls['type'] = 'CALL'
             
@@ -68,12 +70,14 @@ def fetch_options(ticker_symbol: str, target_size: int = 100) -> Tuple[List[Mark
                 
                 # FALLBACK: If Ask is also 0 (data error), try lastPrice, else skip
                 if market_p <= 0.01: 
-                    market_p = row['lastPrice']
+                    market_p = row.get('lastPrice', 0.0)
                 
                 # FINAL SAFETY: If it's still < 0.01, it will crash the optimizer. Skip it.
                 if market_p < 0.01: continue
 
-                spread = row['ask'] - row['bid']
+                # Safe spread calc (handle missing bid)
+                bid_val = row.get('bid', 0.0)
+                spread = market_p - bid_val
                 
                 # Moneyness Filter (0.75 to 1.25 covers the relevant smile)
                 moneyness = row['strike'] / S0
@@ -87,7 +91,8 @@ def fetch_options(ticker_symbol: str, target_size: int = 100) -> Tuple[List[Mark
                     'moneyness': moneyness,
                     'type': row['type']
                 })
-        except: continue
+        except Exception as e:
+            continue
 
     if not all_candidates: return [], S0
     df = pd.DataFrame(all_candidates)
@@ -105,19 +110,21 @@ def fetch_options(ticker_symbol: str, target_size: int = 100) -> Tuple[List[Mark
     for mat in unique_maturities:
         mat_slice = df[df['maturity'] == mat]
         
+        # Sort by liquidity (spread) to get the "cleanest" prices
         puts_slice = mat_slice[mat_slice['type'] == 'PUT'].sort_values('spread')
         calls_slice = mat_slice[mat_slice['type'] == 'CALL'].sort_values('spread')
         
         n_side = target_per_date // 2
         
         best_puts = puts_slice.head(n_side)
-        best_calls = calls_slice.head(n_side + 2)
+        best_calls = calls_slice.head(n_side + 2) # Slight bias for calls if odd number
         
         final_selection.extend(best_puts.to_dict('records'))
         final_selection.extend(best_calls.to_dict('records'))
 
     final_df = pd.DataFrame(final_selection)
     
+    # Final random sample if we still have too many
     if len(final_df) > target_size:
         final_df = final_df.sample(n=target_size, random_state=42)
     
