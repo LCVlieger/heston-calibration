@@ -10,14 +10,14 @@ class MarketOption:
     strike: float
     maturity: float
     market_price: float
-    option_type: str = "CALL"  # Now stores "CALL" or "PUT"
+    option_type: str = "CALL" 
 
 def fetch_options(ticker_symbol: str, target_size: int = 100) -> Tuple[List[MarketOption], float]:
     """
     PRO FETCHER:
-    - Fetches OTM Puts (Left Wing) and OTM Calls (Right Wing).
-    - Stratifies across all available maturities (Time).
-    - Zero Intrinsic Value in the dataset.
+    - Uses ASK price to avoid zero-bid crashes during after-hours/illiquid periods.
+    - Stratifies across T > 0.46.
+    - Filters out 'ghost' options with 0.00 price.
     """
     ticker = yf.Ticker(ticker_symbol)
     
@@ -37,7 +37,7 @@ def fetch_options(ticker_symbol: str, target_size: int = 100) -> Tuple[List[Mark
     today = datetime.now()
     
     all_candidates = []
-    # Use Domain Restriction immediately (T > 0.46) to fix Xi instability
+    # Domain Restriction (T > 0.46) to fix NVDA Xi instability
     MIN_T, MAX_T = 0.46, 2.5 
     
     print("Scanning option chains (Puts & Calls)...")
@@ -52,39 +52,47 @@ def fetch_options(ticker_symbol: str, target_size: int = 100) -> Tuple[List[Mark
             calls = chain.calls
             puts = chain.puts
             
-            # --- SELECTION LOGIC ---
-            # 1. OTM Puts (Strikes < Spot) -> Capture Downside Skew
+            # Filter for OTM Puts (K < S0)
             candidates_puts = puts[puts['strike'] < S0].copy()
             candidates_puts['type'] = 'PUT'
             
-            # 2. OTM Calls (Strikes >= Spot) -> Capture Upside/Smile
+            # Filter for OTM Calls (K >= S0)
             candidates_calls = calls[calls['strike'] >= S0].copy()
             candidates_calls['type'] = 'CALL'
             
-            # Combine and Filter
             combined = pd.concat([candidates_puts, candidates_calls])
             
-            # Quality Mask
-            mask = (combined['bid'] > 0.05) & (combined['openInterest'] > 0)
-            valid = combined[mask].copy()
-            
-            for _, row in valid.iterrows():
-                mid = (row['bid'] + row['ask']) / 2.0
-                spread = row['ask'] - row['bid']
+            # --- VALIDATION LOOP ---
+            for _, row in combined.iterrows():
+                # FIX: Use ASK price instead of Mid or Bid
+                # When markets are closed, Bid often drops to 0.00, but Ask remains.
+                market_p = row['ask']
                 
-                # Moneyness Filter (0.6 to 1.5 covers the relevant smile)
+                # FALLBACK: If Ask is also 0 (data error), try lastPrice, else skip
+                if market_p <= 0.01: 
+                    market_p = row.get('lastPrice', 0.0)
+                
+                # FINAL SAFETY: If it's still < 0.01, it will crash the optimizer. Skip it.
+                if market_p < 0.01: continue
+
+                # Safe spread calc (handle missing bid)
+                bid_val = row.get('bid', 0.0)
+                spread = market_p - bid_val
+                
+                # Moneyness Filter (0.75 to 1.25 covers the relevant smile)
                 moneyness = row['strike'] / S0
-                if not (0.6 <= moneyness <= 1.5): continue
+                if not (0.75 <= moneyness <= 1.25): continue 
 
                 all_candidates.append({
                     'strike': row['strike'],
                     'maturity': T,
-                    'market_price': mid,
+                    'market_price': market_p, # Now using ASK
                     'spread': spread,
                     'moneyness': moneyness,
                     'type': row['type']
                 })
-        except: continue
+        except Exception as e:
+            continue
 
     if not all_candidates: return [], S0
     df = pd.DataFrame(all_candidates)
@@ -102,23 +110,21 @@ def fetch_options(ticker_symbol: str, target_size: int = 100) -> Tuple[List[Mark
     for mat in unique_maturities:
         mat_slice = df[df['maturity'] == mat]
         
-        # Split by Type instead of arbitrary moneyness
-        # This ensures we get both Left Wing (Puts) and Right Wing (Calls)
+        # Sort by liquidity (spread) to get the "cleanest" prices
         puts_slice = mat_slice[mat_slice['type'] == 'PUT'].sort_values('spread')
         calls_slice = mat_slice[mat_slice['type'] == 'CALL'].sort_values('spread')
         
         n_side = target_per_date // 2
         
         best_puts = puts_slice.head(n_side)
-        best_calls = calls_slice.head(n_side + 2) # Slightly more calls usually available
+        best_calls = calls_slice.head(n_side + 2) # Slight bias for calls if odd number
         
         final_selection.extend(best_puts.to_dict('records'))
         final_selection.extend(best_calls.to_dict('records'))
 
-    # 4. FINAL POLISH
     final_df = pd.DataFrame(final_selection)
     
-    # Random sample if over target (preserves distribution better than spread sort)
+    # Final random sample if we still have too many
     if len(final_df) > target_size:
         final_df = final_df.sample(n=target_size, random_state=42)
     

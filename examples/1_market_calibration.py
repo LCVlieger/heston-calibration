@@ -12,12 +12,9 @@ from scipy.ndimage import gaussian_filter
 
 # Local package imports
 try:
-    from heston_pricer.calibration import HestonCalibrator, HestonCalibratorMC, implied_volatility
+    from heston_pricer.calibration import HestonCalibrator, implied_volatility, SimpleYieldCurve
     from heston_pricer.analytics import HestonAnalyticalPricer
     from heston_pricer.data import fetch_options
-    from heston_pricer.models.mc_pricer import MonteCarloPricer
-    from heston_pricer.models.process import HestonProcess
-    from heston_pricer.market import MarketEnvironment
     from heston_pricer.instruments import EuropeanOption, OptionType
 except ImportError:
     raise ImportError("heston_pricer package not found. Ensure PYTHONPATH is set correctly.")
@@ -29,56 +26,61 @@ Calibrates Heston parameters to live market data (NVDA/SPX) and generates
 a publication-grade volatility surface visualization.
 """
 
-def save_results(ticker, S0, r, q, res_ana, res_mc, options):
+def save_results(ticker, S0, r_curve, q, res_ana, options):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_name = f"calibration_{ticker}_{timestamp}"
     
-    # Save Metadata
+    # --- 1. FIX: Save Metadata (Convert Curve to Dict) ---
     with open(f"{base_name}_meta.json", "w") as f: 
         json.dump({
-            "market": {"S0": S0, "r": r, "q": q}, 
+            "market": {
+                "S0": S0, 
+                "r": r_curve.to_dict(), # FIX: Call to_dict() here
+                "q": q
+            }, 
             "analytical": res_ana, 
-            "monte_carlo_results": res_mc 
         }, f, indent=4)
 
-    # --- 1. VALIDATION TABLE ---
-    env_mc = MarketEnvironment(
-        S0=S0, r=r, q=q,
-        kappa=res_mc['kappa'], theta=res_mc['theta'], 
-        xi=res_mc['xi'], rho=res_mc['rho'], v0=res_mc['v0']
-    )
-    process_mc = HestonProcess(env_mc)
-    pricer_mc = MonteCarloPricer(process_mc)
-
+    # --- 2. VALIDATION TABLE ---
     get_params_ana = lambda res: [res.get(k, 0) for k in ['kappa', 'theta', 'xi', 'rho', 'v0']]
     rows = []
     
-    print(f"\n[Validation] Re-pricing {len(options)} instruments with Monte Carlo engine...")
+    print(f"\n[Validation] Re-pricing {len(options)} instruments with Yield Curve...")
 
     for opt in options:
-        p_ana = HestonAnalyticalPricer.price_european_call(S0, opt.strike, opt.maturity, r, q, *get_params_ana(res_ana))
-        steps = int(max(20, opt.maturity * 252)) 
-        instrument = EuropeanOption(opt.strike, opt.maturity, OptionType.CALL)
-        mc_result = pricer_mc.price(instrument, n_paths=100_000, n_steps=steps)
-        p_mc = mc_result.price
-        iv_mkt = implied_volatility(opt.market_price, S0, opt.strike, opt.maturity, r, q)
-        iv_mc = implied_volatility(p_mc, S0, opt.strike, opt.maturity, r, q)
+        is_put = (opt.option_type == "PUT")
+        inst_type = OptionType.PUT if is_put else OptionType.CALL
+        
+        # FIX: Get maturity-specific rate for this option
+        r_T = r_curve.get_rate(opt.maturity)
+        
+        # Analytical Price (Dispatch using r_T)
+        if is_put:
+            p_ana = HestonAnalyticalPricer.price_european_put(
+                S0, opt.strike, opt.maturity, r_T, q, *get_params_ana(res_ana)
+            )
+        else:
+            p_ana = HestonAnalyticalPricer.price_european_call(
+                S0, opt.strike, opt.maturity, r_T, q, *get_params_ana(res_ana)
+            )
+            
+        # IV Calculation (Using r_T for 100% accuracy)
+        iv_mkt = implied_volatility(opt.market_price, S0, opt.strike, opt.maturity, r_T, q, opt.option_type)
 
         rows.append({
-            "T": opt.maturity, "K": opt.strike, "Mkt": opt.market_price, 
-            "Ana": round(p_ana, 2), "Err_A": round(p_ana - opt.market_price, 2),
-            "MC": round(p_mc, 2), "Err_MC": round(p_mc - opt.market_price, 2),
-            "IV_Mkt": iv_mkt, "IV_MC": iv_mc
+            "Type": opt.option_type,
+            "T": opt.maturity, 
+            "K": opt.strike, 
+            "Mkt": opt.market_price, 
+            "Ana": round(p_ana, 2), 
+            "Err_A": round(p_ana - opt.market_price, 2),
+            "IV_Mkt": iv_mkt,
+            "r_used": round(r_T, 4) # Useful for debugging
         })
 
     df = pd.DataFrame(rows)
-    print(df[["T", "K", "Mkt", "Ana", "Err_A", "MC", "Err_MC"]].to_string(index=False))
-    df.to_csv(f"{base_name}_prices.csv", index=False) 
-    
-    # --- 2. VISUALIZATION (Updated with Smoothing & Clipping) ---
-    plot_surface(S0, r, q, res_mc, ticker, f"results/{base_name}", market_options=options)
-    
-    log(f"Artifacts saved to results/{base_name}*")
+    print(df[["Type", "T", "K", "Mkt", "Ana", "Err_A"]].to_string(index=False))
+    df.to_csv(f"{base_name}_prices.csv", index=False)
 
 def plot_surface(S0, r, q, params, ticker, filename, market_options=None):
     """
@@ -103,22 +105,22 @@ def plot_surface(S0, r, q, params, ticker, filename, market_options=None):
     for i in range(X.shape[0]):
         for j in range(X.shape[1]):
             T_val, M_val = Y[i, j], X[i, j]
+            # Surface is typically drawn for Calls (canonical view)
             price = HestonAnalyticalPricer.price_european_call(
                 S0, S0 * M_val, T_val, r, q, kappa, theta, xi, rho, v0
             )
             try:
-                iv = implied_volatility(price, S0, S0 * M_val, T_val, r, q)
+                # IV surface is agnostic to put/call parity (should be same), using Call for surface generation
+                iv = implied_volatility(price, S0, S0 * M_val, T_val, r, q, "CALL")
                 Z[i, j] = iv if 0.01 < iv < 2.5 else np.nan
             except:
                 Z[i, j] = np.nan
 
     # --- C. SMOOTHING ---
-    # Fill NaNs to allow smooth filtering
     mask = np.isnan(Z)
     if np.any(mask):
         Z = pd.DataFrame(Z).interpolate(method='linear', axis=1).ffill(axis=1).bfill(axis=1).values
     
-    # Apply Gaussian Filter to remove "shark teeth"
     Z_smooth = gaussian_filter(Z, sigma=0.6)
 
     # --- D. VISUALIZATION ---
@@ -134,7 +136,6 @@ def plot_surface(S0, r, q, params, ticker, filename, market_options=None):
 
         # 2. Market Data (Needles)
         if market_options:
-            # STRICT FILTER: Only plot points within the visual box
             plot_opts = [
                 o for o in market_options 
                 if (LOWER_M <= (o.strike/S0) <= UPPER_M) and (LOWER_T <= o.maturity <= UPPER_T)
@@ -144,29 +145,25 @@ def plot_surface(S0, r, q, params, ticker, filename, market_options=None):
             for opt in plot_opts:
                 m_mkt, t_mkt = opt.strike / S0, opt.maturity
                 try:
-                    iv_mkt = implied_volatility(opt.market_price, S0, opt.strike, opt.maturity, r, q)
+                    iv_mkt = implied_volatility(opt.market_price, S0, opt.strike, opt.maturity, r, q, opt.option_type)
                     if iv_mkt < 0.01 or iv_mkt > 2.5: continue
                 except: continue
 
-                # Match against SMOOTHED model surface
                 m_idx = (np.abs(M_range - m_mkt)).argmin()
                 t_idx = (np.abs(T_range - t_mkt)).argmin()
                 iv_mod = Z_smooth[t_idx, m_idx]
 
                 if np.isnan(iv_mod): continue
 
-                # Outlier Check (>1.8% deviation)
                 if abs(iv_mkt - iv_mod) > 0.018: continue
                 
                 valid_needles += 1
                 is_above = iv_mkt >= iv_mod
                 dot_zorder = 10 if is_above else 1
                 
-                # Needle Line
                 ax.plot([m_mkt, m_mkt], [t_mkt, t_mkt], [iv_mod, iv_mkt], 
                         color='white', linestyle='-', linewidth=1.1, alpha=0.6, zorder=dot_zorder)
                 
-                # Pearl Dot
                 lbl = 'Market Price-IV' if valid_needles == 1 else ""
                 ax.plot([m_mkt], [t_mkt], [iv_mkt], 
                         marker='o', linestyle='None', color="#F0F0F0",         
@@ -175,7 +172,7 @@ def plot_surface(S0, r, q, params, ticker, filename, market_options=None):
         # 3. Aesthetics
         ax.dist = 11
         ax.set_xlim(LOWER_M, UPPER_M)
-        ax.set_ylim(UPPER_T, LOWER_T) # Inverted T axis
+        ax.set_ylim(UPPER_T, LOWER_T)
         
         ax.xaxis.set_pane_color((1, 1, 1, 0))
         ax.yaxis.set_pane_color((1, 1, 1, 0))
@@ -184,7 +181,6 @@ def plot_surface(S0, r, q, params, ticker, filename, market_options=None):
         ax.grid(True, color='gray', linestyle=':', linewidth=0.5, alpha=0.3)
         ax.view_init(elev=28, azim=-115)
 
-        # Labels
         fig.text(0.535, 0.84, rf"Heston Implied Volatility Surface: {ticker}", 
                  color='white', fontsize=16, fontweight='bold', family='monospace', ha='center')
         subtitle = rf"$\kappa={kappa:.2f}, \theta={theta:.2f}, \xi={xi:.2f}, \rho={rho:.2f}, v_0={v0:.3f}$"
@@ -207,12 +203,10 @@ def plot_surface(S0, r, q, params, ticker, filename, market_options=None):
 
 def main():
     clear_numba_cache()
-    # Create results dir if not exists
     os.makedirs("results", exist_ok=True)
     
-    ticker = "^SPX" #"^SPX" # "NVDA" 
+    ticker = "MSFT" #"^SPX" #"^SPX" 
     
-    # Fetch Market Data 
     options, S0 = fetch_options(ticker)
     if not options:
         log(f"No liquidity for {ticker}")
@@ -222,12 +216,21 @@ def main():
     log(f"Target: {ticker} (S0={S0:.2f}) | N={len(options)}")
     
     avg_mkt_price = np.mean([o.market_price for o in options]) if options else 1.0
-    r, q = 0.045, 0.011#0.0002 #11  # SPX Dividend Yield approx 0.0 or embedded in Futures
+    q = 0.0078 #0.0113 #0.0002 #0.0426, 
+    tenors = [0.08, 0.25, 0.5, 1.0, 2.0, 3.0]
+    rates = [
+        0.0376,  # 1-Month (Inverted high)
+        0.0368,  # 3-Month
+        0.0363,  # 6-Month
+        0.0352,  # 1-Year  (The "Belly" Low - Critical for T=1.0 calibration)
+        0.0356,  # 2-Year  (Starting to steepen)
+        0.0366,  # 3-Year
+    ]
 
-    # Setup Calibrators
-    cal_ana = HestonCalibrator(S0, r, q)
-    cal_mc = HestonCalibratorMC(S0, r, q, n_paths=75_000, n_steps=252)
-    init_guess = [2.0, 0.1, 0.1, -0.7, 0.015]  #[2.21, 0.260, 0.84, -0.26, 0.179]#
+    my_curve = SimpleYieldCurve(tenors, rates)
+    cal_ana = HestonCalibrator(S0, r_curve=my_curve, q=q)
+    #cal_mc = HestonCalibratorMC(S0, r, q, n_paths=75_000, n_steps=252)
+    init_guess = [2.0, 0.025, 0.5, -0.7, 0.015]
 
     # --- 1. Analytical Calibration ---
     t0 = time.time()    
@@ -238,24 +241,22 @@ def main():
     
     # --- 2. Monte Carlo Calibration ---
     t1 = time.time()
-    try:
-        res_mc = cal_mc.calibrate(options, init_guess)
-        rmse_p_mc = np.sqrt(res_mc['fun'] / len(options)) 
-        log(f"MonteCarlo: rmse={rmse_p_mc:.4f} ({rmse_p_mc/avg_mkt_price:.2%}) , IV-rmse={res_mc['rmse_iv']:.4f} ({res_mc['rmse_iv']:.2%}) ({time.time()-t1:.2f}s)")
-    except Exception as e:
-        log(f"MC Fail: {e}")
-        res_mc = res_ana 
+    #try:
+        #res_mc = cal_mc.calibrate(options, init_guess)
+        #rmse_p_mc = np.sqrt(res_mc['fun'] / len(options)) 
+        #log(f"MonteCarlo: rmse={rmse_p_mc:.4f} ({rmse_p_mc/avg_mkt_price:.2%}) , IV-rmse={res_mc['rmse_iv']:.4f} ({res_mc['rmse_iv']:.2%}) ({time.time()-t1:.2f}s)")
+    #except Exception as e:
+    #    log(f"MC Fail: {e}")
+    #    res_mc = res_ana 
 
-    # --- 3. Parameter Comparison ---
     params = ['kappa', 'theta', 'xi', 'rho', 'v0']
     df_params = pd.DataFrame({
         'Ana': [res_ana.get(p, 0.0) for p in params],
-        'MC': [res_mc.get(p, 0.0) for p in params]
+        #'MC': [res_mc.get(p, 0.0) for p in params]
     }, index=params)
     print(df_params.to_string(float_format="{:.4f}".format))
     
-    # --- 4. Save and Visualize ---
-    save_results(ticker, S0, r, q, res_ana, res_mc, options)
+    save_results(ticker, S0, my_curve, q, res_ana,  options)
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
