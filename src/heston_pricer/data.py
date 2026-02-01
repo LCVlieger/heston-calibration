@@ -75,10 +75,11 @@ def fetch_options(ticker_symbol: str, target_size: int = 100) -> Tuple[List[Mark
                 if bid < dynamic_min_bid: continue 
 
                 # 2. Spread Check
-                mid = (bid + ask) / 2.0
-                spread_ratio = (ask - bid) / mid
+                mid = ask #(bid + ask) / 2.0
+                #spread_ratio = (ask - bid) / mid
+                actual_mid = (bid + ask) / 2.0
+                spread_ratio = (ask - bid) / actual_mid if actual_mid > 0 else 1.0
                 if spread_ratio > 0.40: continue 
-
                 all_candidates.append({
                     'strike': K, 'maturity': T, 'market_price': mid,
                     'spread_ratio': spread_ratio, 'type': row['type'],
@@ -99,7 +100,7 @@ def fetch_options(ticker_symbol: str, target_size: int = 100) -> Tuple[List[Mark
     selected_indices = set()
     
     # Skew Factor: 2.0 = Quadratic (Standard), 3.0 = Cubic (Very ATM heavy)
-    SKEW_POWER = 2.0
+    SKEW_POWER = 1.5
     
     print(f"Stratifying {len(unique_maturities)} maturities with Quadratic ATM Skew...")
     
